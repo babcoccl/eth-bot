@@ -8,17 +8,25 @@ v3 changes tested:
   2. max_accum_depth_pct=0.35 — stops new buys when crash > 35% from start.
      Preserves dry powder for bottom accumulation later.
   3. Depth-tiered hold periods:
-     shallow: 120d  |  moderate: 180d  |  major: 270d  |  catastrophic: 365d
+     shallow: 120d  |  moderate: 180d  |  major: 365d  |  catastrophic: 730d
   4. Position Reserve Manager tranches replace flat profit_target:
-     +10% → sell 33%  |  +15% → sell 33%  |  +20% → sell rest
-     OVR-2: CORRECTION + unrealized>8% → exit all (bird in hand)
+     +10% -> sell 33%  |  +15% -> sell 33%  |  +20% -> sell rest
+     OVR-2: CORRECTION + unrealized>8% -> exit all (bird in hand)
+
+Performance notes:
+  - fetch_ohlcv() caches historical Parquet files in ./ohlcv_cache/
+    First run fetches from Coinbase; subsequent runs load from disk (~50x faster).
+  - Windows run in parallel via ThreadPoolExecutor (4 workers by default).
+    Use --workers 1 to disable parallelism for debugging.
+  - df_warm is deduplicated: sliced from df5 instead of a separate API call.
 
 Key hypothesis additions:
   H8: No emergency SELL exits on crashes > 35% from start (FROZEN instead)
-  H9: FROZEN positions reach profit_target within 365d
+  H9: FROZEN positions reach profit_target within 730d
 """
 
 import argparse, sys, os, warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +43,7 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=365, lookback
     p = PRESETS[preset_name]
     start_dt  = datetime.strptime(window["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
     crash_end = datetime.strptime(window["end"],   "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
     # Auto-detect maximum hold days from preset to ensure data coverage.
     # A 730d catastrophic hold needs 730d of post-crash data — not 365d.
     preset_max_hold = max(
@@ -45,22 +54,23 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=365, lookback
         p.get("max_hold_days",              max_hold_days),
         max_hold_days,
     )
-    ext_end   = crash_end + timedelta(days=preset_max_hold)
-    warm_dt   = start_dt - timedelta(days=lookback)
+    ext_end = crash_end + timedelta(days=preset_max_hold)
+    warm_dt = start_dt - timedelta(days=lookback)
 
+    # ── Fetch full range once; slice df_warm from it (saves one API call) ────
     df5  = fetch_ohlcv(symbol, "5m",  warm_dt, ext_end)
     df1h = fetch_ohlcv(symbol, "1h",  warm_dt, ext_end)
-    df_warm = fetch_ohlcv(symbol, "5m", warm_dt, start_dt)
 
     if df5 is None or len(df5) < 50:
         return pd.DataFrame(), {}
 
+    # df_warm is the warmup slice — no extra fetch needed
+    df_warm = df5[df5["ts"] < pd.Timestamp(start_dt)].reset_index(drop=True)
+
     df_ind = prepare_indicators(df5, df1h)
-    df_run = df_ind[df_ind["ts"] >= start_dt].reset_index(drop=True)
+    df_run = df_ind[df_ind["ts"] >= pd.Timestamp(start_dt)].reset_index(drop=True)
 
     bot = CrashAccumulator(symbol=symbol.replace("/", "-"))
-    # crash_end_ts: stop accumulating after crash window closes.
-    # Bot holds position in patient mode through extended window.
     return bot.run_backtest(df_run, p, capital, preset_name,
                             df_warm=df_warm, crash_end_ts=crash_end)
 
@@ -158,23 +168,46 @@ def main():
     ap.add_argument("--preset",        default="accumulator_v3",
                     choices=list(PRESETS.keys()))
     ap.add_argument("--max-hold-days", default=365, type=int)
+    ap.add_argument("--workers",       default=4, type=int,
+                    help="Parallel window workers (default=4, use 1 to disable)")
+    ap.add_argument("--no-cache",      action="store_true",
+                    help="Force live fetch, bypass disk cache")
     args = ap.parse_args()
 
-    print(f"Running {len(CRASH_WINDOWS)} CRASH windows (max hold {args.max_hold_days}d)...")
-    results = []
-    for w in CRASH_WINDOWS:
-        print(f"  [{w['label']}]  {w['start']}  {w['severity']}", end=" ... ", flush=True)
+    if args.no_cache:
+        from eth_helpers import clear_ohlcv_cache
+        clear_ohlcv_cache()
+
+    print(f"Running {len(CRASH_WINDOWS)} CRASH windows (max hold {args.max_hold_days}d, "
+          f"workers={args.workers})...")
+
+    # ── Parallel execution ────────────────────────────────────────────────────
+    # Each window is independent — safe to parallelize.
+    # Results are re-sorted to match CRASH_WINDOWS order for deterministic output.
+    results_map = {}
+
+    def _run(w):
         tdf, s = run_window(args.symbol, w, args.capital, args.preset, args.max_hold_days)
-        if s:
-            frozen  = s.get("frozen", False)
-            e_exits = s.get("emergency_exits", 0)
-            p_exits = s.get("profit_exits", 0)
-            tag = "FROZEN" if frozen else ("EMERG" if e_exits else ("PT" if p_exits else "open"))
-            print(f"{s.get('buys',0)} buys  disc={s.get('discount_pct',0):+.1f}%  "
-                  f"{tag}  pnl=${s.get('realized_pnl',0):+.2f}")
-        else:
-            print("no data")
-        results.append((w, tdf, s))
+        return w, tdf, s
+
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futures = {ex.submit(_run, w): w for w in CRASH_WINDOWS}
+        for fut in as_completed(futures):
+            w, tdf, s = fut.result()
+            results_map[w["label"]] = (w, tdf, s)
+            if s:
+                frozen  = s.get("frozen", False)
+                e_exits = s.get("emergency_exits", 0)
+                p_exits = s.get("profit_exits", 0)
+                tag = "FROZEN" if frozen else ("EMERG" if e_exits else ("PT" if p_exits else "open"))
+                print(f"  [{w['label']}]  {w['start']}  {w['severity']} ... "
+                      f"{s.get('buys',0)} buys  disc={s.get('discount_pct',0):+.1f}%  "
+                      f"{tag}  pnl=${s.get('realized_pnl',0):+.2f}")
+            else:
+                print(f"  [{w['label']}]  no data")
+
+    # Re-sort to original window order
+    results = [results_map[w["label"]] for w in CRASH_WINDOWS]
 
     print_results(results, args.capital, args.preset)
 

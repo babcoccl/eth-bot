@@ -9,7 +9,8 @@ update ARCHITECTURE.md and eth_helpers.pyi simultaneously.
 Exports
 -------
 IND                 : dict   — indicator hyper-parameters
-fetch_ohlcv()       : Coinbase public REST candle fetch
+fetch_ohlcv()       : Coinbase public REST candle fetch (disk-cached)
+clear_ohlcv_cache() : wipe the on-disk Parquet cache
 calc_rsi()          : Wilder RSI
 calc_atr()          : EWM ATR
 calc_bollinger()    : Bollinger Bands + bandwidth
@@ -18,9 +19,12 @@ calc_regime()       : h1 regime (UPTREND / DOWNTREND / RANGE)
 prepare_indicators(): join 5m features + h1 regime_h1 column
 """
 
+import os
 import sys
+import hashlib
 import warnings
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -38,6 +42,33 @@ IND = {
     "regime_fast":  20,
     "regime_slow":  50,
 }
+
+# ── On-disk OHLCV cache ───────────────────────────────────────────────────────
+# Parquet files stored in ./ohlcv_cache/  (git-ignored).
+# Cache key = SHA256(symbol + timeframe + since_date + until_date).
+# Historical dates (until_dt < now - 1d) are treated as immutable.
+# Recent dates (within 1 day of now) are always re-fetched.
+_CACHE_DIR = Path(__file__).parent / "ohlcv_cache"
+_CACHE_DIR.mkdir(exist_ok=True)
+_FRESH_SECONDS = 86400  # dates within 24h of now are not cached
+
+
+def _cache_key(symbol: str, timeframe: str, since_dt: datetime, until_dt: datetime) -> str:
+    raw = f"{symbol}|{timeframe}|{since_dt.date()}|{until_dt.date()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _is_historical(until_dt: datetime) -> bool:
+    """True if until_dt is more than 24h in the past — safe to cache permanently."""
+    now_ts = datetime.now(timezone.utc).timestamp()
+    return (now_ts - until_dt.timestamp()) > _FRESH_SECONDS
+
+
+def clear_ohlcv_cache():
+    """Delete all cached Parquet files."""
+    for f in _CACHE_DIR.glob("*.parquet"):
+        f.unlink()
+    print(f"[CACHE] Cleared {_CACHE_DIR}")
 
 
 # ── Pure indicator math ───────────────────────────────────────────────────────
@@ -83,9 +114,43 @@ def calc_regime(close_h1, fast=20, slow=50):
     return regime, fast_ma, slow_ma
 
 
-# ── Coinbase public REST fetch ────────────────────────────────────────────────
+# ── Coinbase public REST fetch (with disk cache) ──────────────────────────────
 
-def fetch_ohlcv(symbol, timeframe, since_dt, until_dt):
+def fetch_ohlcv(symbol, timeframe, since_dt, until_dt, use_cache=True):
+    """
+    Fetch OHLCV from Coinbase REST API with optional Parquet disk cache.
+
+    Historical ranges (until_dt > 24h ago) are cached to ./ohlcv_cache/ and
+    served instantly on subsequent calls — no network round-trips.
+    Set use_cache=False to force a live fetch (e.g. for current-day data).
+    """
+    key = _cache_key(symbol, timeframe, since_dt, until_dt)
+    cache_file = _CACHE_DIR / f"{key}.parquet"
+    historical = _is_historical(until_dt)
+
+    # ── Cache read ────────────────────────────────────────────────────────────
+    if use_cache and historical and cache_file.exists():
+        try:
+            df = pd.read_parquet(cache_file)
+            return df
+        except Exception:
+            cache_file.unlink(missing_ok=True)  # corrupt cache — re-fetch
+
+    # ── Live fetch ────────────────────────────────────────────────────────────
+    df = _fetch_ohlcv_live(symbol, timeframe, since_dt, until_dt)
+
+    # ── Cache write (historical only) ─────────────────────────────────────────
+    if use_cache and historical and df is not None and len(df) > 0:
+        try:
+            df.to_parquet(cache_file, index=False)
+        except Exception as e:
+            print(f"[CACHE] Warning: could not write cache: {e}", file=sys.stderr)
+
+    return df
+
+
+def _fetch_ohlcv_live(symbol, timeframe, since_dt, until_dt):
+    """Raw Coinbase REST fetch — no caching. Called by fetch_ohlcv()."""
     import time as _time
     TF_MAP = {"1m": 60, "5m": 300, "15m": 900,
               "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
