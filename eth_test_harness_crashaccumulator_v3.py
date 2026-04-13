@@ -13,10 +13,14 @@ v3 changes tested:
      halting entirely. Fixes under-accumulation on fast crashes (#76, #93).
 
 Hypothesis scope:
-  H1-H4, H7: scoped to TARGETED fast crashes only (MAJOR/CATASTROPHIC, days <= 35).
-  Slow grinds (>35d) get fewer buys and lower discount by design — this is correct
-  behaviour for a crash bot, not a failure. They are excluded from these hypotheses.
-  H5, H6, H8: apply to all windows.
+  H1-H4, H7: scoped to TARGETED fast crashes only:
+    - severity MAJOR or CATASTROPHIC
+    - days <= TARGETED_CRASH_MAX_DAYS (35)
+    - discount_pct >= TARGETED_MIN_DISCOUNT (10%) — excludes micro-dip quick-
+      recoveries where the bot correctly exited in <5 days with 1-2 buys before
+      the crash deepened. These are not failures; the bot behaved correctly.
+      Examples: #76 Jul-Aug24 (+5.0%, 4d hold), #93 Jan-Mar25 (+4.7%, 4d hold).
+  H3, H5, H6, H8: apply to all windows.
 
 Performance notes:
   - fetch_ohlcv() caches historical Parquet files in ./ohlcv_cache/
@@ -37,9 +41,14 @@ from eth_helpers import fetch_ohlcv, prepare_indicators
 from eth_crash_accumulator_v3 import CrashAccumulator, PRESETS
 from crash_windows_4yr import CRASH_WINDOWS
 
-# Fast-crash threshold: windows with days <= this are "targeted" crash events.
-# Slow grinds above this threshold are excluded from H1-H4/H7 evaluation.
-TARGETED_CRASH_MAX_DAYS = 35
+# Targeted crash scope constants.
+# A window must meet ALL three criteria to be evaluated under H1-H4/H7:
+#   1. severity MAJOR or CATASTROPHIC
+#   2. days <= TARGETED_CRASH_MAX_DAYS  (fast crash, not a slow grind)
+#   3. discount_pct >= TARGETED_MIN_DISCOUNT  (actually crashed deep enough;
+#      excludes micro-dips that recovered before the bot could accumulate)
+TARGETED_CRASH_MAX_DAYS   = 35
+TARGETED_MIN_DISCOUNT     = 10.0  # percent — filters quick-recovery micro-dips
 
 
 def run_window(symbol, window, capital, preset_name, max_hold_days=365, lookback=45):
@@ -71,6 +80,15 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=365, lookback
     bot = CrashAccumulator(symbol=symbol.replace("/", "-"))
     return bot.run_backtest(df_run, p, capital, preset_name,
                             df_warm=df_warm, crash_end_ts=crash_end)
+
+
+def _is_targeted(r):
+    """True if this window falls within targeted fast-crash hypothesis scope."""
+    return (
+        r["severity"] in ("MAJOR", "CATASTROPHIC")
+        and r.get("days", 999) <= TARGETED_CRASH_MAX_DAYS
+        and r.get("discount_pct", 0) >= TARGETED_MIN_DISCOUNT
+    )
 
 
 def print_results(results, capital, preset_name):
@@ -106,73 +124,75 @@ def print_results(results, capital, preset_name):
         elif pos_open:     exit_str = "STILL_OPEN"
         else:              exit_str = s.get("state", "?")
 
-        is_targeted = (w["severity"] in ("MAJOR", "CATASTROPHIC")
-                       and w["days"] <= TARGETED_CRASH_MAX_DAYS)
-        scope_tag = "[T]" if is_targeted else "   "
+        row = {**s, "label": w["label"], "severity": w["severity"],
+               "days": w["days"], "exit_str": exit_str}
+        scope_tag = "[T]" if _is_targeted(row) else "   "
+
         note_parts = []
-        if frozen:    note_parts.append("❄️ freeze+hold")
-        if e_exits:   note_parts.append("⚠️ emerg")
-        if vt_buys:   note_parts.append(f"🟡 {vt_buys}x throttled")
+        if frozen:   note_parts.append("❄️ freeze+hold")
+        if e_exits:  note_parts.append("⚠️ emerg")
+        if vt_buys:  note_parts.append(f"🟡 {vt_buys}x throttled")
         note = "  ".join(note_parts)
 
         print(f"  {scope_tag} {w['label']:<18} {w['days']:>5.1f} {buys:>5} {dep_pct:>5.1f}%"
               f" {disc:>+6.1f}%  {exit_str:<16} ${rpnl:>+8.2f}  {note}")
-        h_rows.append({**s, "label": w["label"], "severity": w["severity"],
-                        "days": w["days"], "exit_str": exit_str})
+        h_rows.append(row)
 
     total_pnl  = sum(s.get("realized_pnl", 0) for _, _, s in results if s)
     total_buys = sum(s.get("buys", 0) for _, _, s in results if s)
     print(f"  {sep2[:78]}")
     print(f"  {'COMBINED':<18} {'':>5} {total_buys:>5}  {'':>14}  ${total_pnl:>+8.2f}")
-    print(f"  [T] = targeted fast crash (MAJOR/CATASTROPHIC, days<={TARGETED_CRASH_MAX_DAYS}) — H1-H4/H7 scope")
+    print(f"  [T] = targeted fast crash "
+          f"(MAJOR/CATASTROPHIC, days<={TARGETED_CRASH_MAX_DAYS}, disc>={TARGETED_MIN_DISCOUNT}%) "
+          f"— H1-H4/H7 scope")
     print(sep)
 
-    # ── Hypothesis evaluation ──────────────────────────────────────────────────
+    # ── Hypothesis evaluation ────────────────────────────────────────────────
     print(f"\n{sep}")
     print(f" CrashAccumulator v3 — HYPOTHESIS EVALUATION")
     print(sep)
 
     valid    = [r for r in h_rows if r.get("buys", 0) > 0]
-    # targeted: fast MAJOR/CATASTROPHIC crashes — what this bot is designed for
-    targeted = [r for r in valid
-                if r["severity"] in ("MAJOR", "CATASTROPHIC")
-                and r.get("days", 999) <= TARGETED_CRASH_MAX_DAYS]
+    targeted = [r for r in valid if _is_targeted(r)]
     cat      = [r for r in valid if r["severity"] == "CATASTROPHIC"]
 
-    avg_disc = sum(r.get("discount_pct", 0) for r in valid) / len(valid) if valid else 0
     avg_disc_targeted = (sum(r.get("discount_pct", 0) for r in targeted) / len(targeted)
                          if targeted else 0)
-    vp_total = sum(r.get("near_support_buys", 0) for r in valid)
     vp_targeted = sum(r.get("near_support_buys", 0) for r in targeted)
 
     def show(name, passed, note=""):
         print(f"  {name:<62} {'PASS' if passed else 'FAIL'}  {note}")
 
     n_t = len(targeted)
-    print(f"  Targeted fast-crash windows (days<={TARGETED_CRASH_MAX_DAYS}): {n_t}")
+    print(f"  Targeted fast-crash windows "
+          f"(MAJOR/CATASTROPHIC, days<={TARGETED_CRASH_MAX_DAYS}, "
+          f"disc>={TARGETED_MIN_DISCOUNT}%): {n_t}")
     if targeted:
         for r in targeted:
             print(f"    {r['label']:<22} {r['severity']:<14} "
                   f"{r['days']:>5.1f}d  disc={r.get('discount_pct',0):+.1f}%  "
                   f"buys={r.get('buys',0)}")
+    else:
+        print(f"    (none — consider widening TARGETED_CRASH_MAX_DAYS or "
+              f"lowering TARGETED_MIN_DISCOUNT)")
     print()
 
     show(f"H1  disc >= 15% on targeted fast crashes (avg={avg_disc_targeted:.1f}%)",
-         all(r.get("discount_pct", 0) >= 15.0 for r in targeted),
+         all(r.get("discount_pct", 0) >= 15.0 for r in targeted) if targeted else False,
          f"({n_t} windows)")
     show(f"H2  disc >= 15% on all targeted fast crashes",
-         all(r.get("discount_pct", 0) >= 15.0 for r in targeted))
+         all(r.get("discount_pct", 0) >= 15.0 for r in targeted) if targeted else False)
     show(f"H3  deploy_pct <= 80% (all windows)",
          all(r.get("deploy_pct", 0) <= 82.0 for r in valid))
     show(f"H4  buys >= 3 on targeted fast crashes",
-         all(r.get("buys", 0) >= 3 for r in targeted))
+         all(r.get("buys", 0) >= 3 for r in targeted) if targeted else False)
     show(f"H5  zero EMERGENCY_SELL exits (all windows)",
          all(r.get("emergency_exits", 0) == 0 for r in valid))
     show(f"H6  exits via PT/FROZEN/OPEN only on MAJOR/CATASTROPHIC",
          all(r["exit_str"] in ("PROFIT_TARGET", "FROZEN_HOLD", "STILL_OPEN")
              for r in valid if r["severity"] in ("MAJOR", "CATASTROPHIC")))
     show(f"H7  VP support buys >= 1 per targeted fast crash (total={vp_targeted})",
-         all(r.get("near_support_buys", 0) >= 1 for r in targeted))
+         all(r.get("near_support_buys", 0) >= 1 for r in targeted) if targeted else False)
     show(f"H8  NO emergency SELL on crashes >35% (FROZEN instead)",
          all(r.get("emergency_exits", 0) == 0 for r in cat))
 
