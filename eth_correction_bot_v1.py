@@ -61,7 +61,7 @@ PRESETS = {
         "support_bonus_pct":      0.015,   # +1.5x at VP support levels
         # Exit
         "profit_target_pct":      0.04,    # exit at +4% above avg_entry
-        "stop_loss_pct":          0.12,    # hard stop at -12% from avg_entry
+        "stop_loss_pct":          0.15,    # hard stop at -12% from avg_entry
         "max_hold_days":          90,      # time-stop at 90 days
         "fee_pct":                0.00065,
     },

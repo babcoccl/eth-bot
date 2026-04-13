@@ -30,22 +30,6 @@ CORRECTION_WINDOWS = [
         "severity": "MODERATE",
     },
     {
-        "label":    "#C02 May22",
-        "start":    "2022-05-05",
-        "end":      "2022-05-12",
-        "days":     7.0,
-        "drop_pct": -20.0,
-        "severity": "DEEP",
-    },
-    {
-        "label":    "#C03 Jun22",
-        "start":    "2022-06-08",
-        "end":      "2022-06-18",
-        "days":     10.0,
-        "drop_pct": -16.0,
-        "severity": "MODERATE",
-    },
-    {
         "label":    "#C04 Jul22",
         "start":    "2022-07-30",
         "end":      "2022-08-05",
