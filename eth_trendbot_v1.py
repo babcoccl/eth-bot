@@ -15,6 +15,12 @@ Fee model:
   round-trip   = 0.090%   = 90 bps
   target_bps must be > 90 to break even; recommended >= 180 (2x fee buffer)
 
+uptrend_bars_min:
+  Number of consecutive 5m bars the h1 regime must have been UPTREND before
+  the bot is allowed to enter. Filters out noisy regime-flip entries where
+  the trend has not yet confirmed, which is the primary driver of PSL fires
+  in choppy MODERATE windows.
+
 Design principle: do ONE thing well.
 This bot only fires when the 1h trend is UP and price pulls back.
 It does not trade ranges, it does not average down.
@@ -37,28 +43,30 @@ warnings.filterwarnings("ignore")
 
 PRESETS = {
     "trendbot_v1": {
-        "base_qty":           0.05,
-        "target_bps":         180,      # must clear 90 bps round-trip fee (2x buffer)
-        "pos_stop_loss_pct":  0.05,     # 5% PSL — R ratio = 1:3.6 vs 180 bps target
-        "uptrend_rsi_max":    44,       # RSI must be below 44 (pullback)
-        "vol_mult_min":       0.80,     # volume confirmation
-        "cooldown_secs":      1800,     # 30 min between entries — reduces overtrading
-        "min_profit_bps":     100,      # entry gate: expected profit must clear fees
-        "zscore_max":        -0.6,      # deeper pullback required (was -0.3)
-        "buy_fee_pct":        0.00065,  # taker fill on entry
-        "sell_fee_pct":       0.00025,  # maker fill on limit target exit
+        "base_qty":            0.05,
+        "target_bps":          180,      # must clear 90 bps round-trip fee (2x buffer)
+        "pos_stop_loss_pct":   0.05,     # 5% PSL — R ratio = 1:3.6 vs 180 bps target
+        "uptrend_rsi_max":     44,       # RSI must be below 44 (pullback)
+        "vol_mult_min":        0.80,     # volume confirmation
+        "cooldown_secs":       1800,     # 30 min between entries — reduces overtrading
+        "min_profit_bps":      100,      # entry gate: expected profit must clear fees
+        "zscore_max":         -0.6,      # deeper pullback required
+        "uptrend_bars_min":    6,        # consecutive UPTREND bars required before entry
+        "buy_fee_pct":         0.00065,  # taker fill on entry
+        "sell_fee_pct":        0.00025,  # maker fill on limit target exit
     },
     "trendbot_v1_aggressive": {
-        "base_qty":           0.05,
-        "target_bps":         220,      # slightly wider target
-        "pos_stop_loss_pct":  0.06,     # 6% PSL
-        "uptrend_rsi_max":    48,       # slightly looser RSI
-        "vol_mult_min":       0.70,
-        "cooldown_secs":      1200,     # 20 min cooldown
-        "min_profit_bps":     120,
-        "zscore_max":        -0.5,      # slightly looser entry
-        "buy_fee_pct":        0.00065,
-        "sell_fee_pct":       0.00025,
+        "base_qty":            0.05,
+        "target_bps":          220,
+        "pos_stop_loss_pct":   0.06,
+        "uptrend_rsi_max":     48,
+        "vol_mult_min":        0.70,
+        "cooldown_secs":       1200,
+        "min_profit_bps":      120,
+        "zscore_max":         -0.5,
+        "uptrend_bars_min":    4,        # slightly looser regime confirmation
+        "buy_fee_pct":         0.00065,
+        "sell_fee_pct":        0.00025,
     },
 }
 
@@ -116,22 +124,31 @@ class TrendBot(BotInterface):
         self._reset(capital)
         p = preset
 
-        buy_fee_pct  = p.get("buy_fee_pct",  p.get("fee_pct", 0.00065))  # taker
-        sell_fee_pct = p.get("sell_fee_pct", p.get("fee_pct", 0.00025))  # maker
-        base_qty     = p["base_qty"]
-        target_bps   = p["target_bps"]
-        psl_pct      = p["pos_stop_loss_pct"]
-        rsi_max      = p["uptrend_rsi_max"]
-        vol_min      = p["vol_mult_min"]
-        cooldown     = p["cooldown_secs"]
-        min_profit   = p.get("min_profit_bps", 0)
-        zscore_max   = p.get("zscore_max", -0.3)  # default preserves old behavior
+        buy_fee_pct      = p.get("buy_fee_pct",      p.get("fee_pct", 0.00065))
+        sell_fee_pct     = p.get("sell_fee_pct",     p.get("fee_pct", 0.00025))
+        base_qty         = p["base_qty"]
+        target_bps       = p["target_bps"]
+        psl_pct          = p["pos_stop_loss_pct"]
+        rsi_max          = p["uptrend_rsi_max"]
+        vol_min          = p["vol_mult_min"]
+        cooldown         = p["cooldown_secs"]
+        min_profit       = p.get("min_profit_bps", 0)
+        zscore_max       = p.get("zscore_max", -0.3)
+        uptrend_bars_min = p.get("uptrend_bars_min", 0)  # 0 = no filter (backwards compat)
+
+        uptrend_streak = 0  # consecutive 5m bars with regime_h1 == UPTREND
 
         for i in range(len(df)):
             row    = df.iloc[i]
             close  = float(row["close"])
             ts     = row["ts"]
             regime = str(row.get("regime_h1", "RANGE"))
+
+            # track consecutive UPTREND bars (reset on any non-UPTREND bar)
+            if regime == "UPTREND":
+                uptrend_streak += 1
+            else:
+                uptrend_streak = 0
 
             self._equity_curve.append(self._cash + self._position.qty * close)
 
@@ -153,6 +170,10 @@ class TrendBot(BotInterface):
             if regime != "UPTREND":
                 continue
 
+            # regime quality gate: skip early/noisy trend entries
+            if uptrend_streak < uptrend_bars_min:
+                continue
+
             _rsi_raw = df["rsi"].iat[i]
             if pd.isna(_rsi_raw):
                 continue
@@ -167,7 +188,7 @@ class TrendBot(BotInterface):
             if in_cooldown:
                 continue
 
-            # uptrend_pb: RSI pullback with volume in h1 UPTREND
+            # uptrend_pb: RSI pullback with volume in confirmed h1 UPTREND
             if (rsi      < rsi_max
                     and rsi    < rsi_prev     # RSI falling — active pullback
                     and zscore < zscore_max   # price meaningfully below short-term mean
