@@ -76,40 +76,37 @@ PRESETS = {
     # ── v3 depth-adaptive preset ──────────────────────────────────────────────
     # Key change: emergency_action="HOLD" for catastrophic crashes (depth>35%).
     # Halts new buys but does NOT liquidate. Trusts ETH V-bottom recovery.
-    # Extends hold to 365d for generational crashes. Uses Position Reserve
+    # Extends hold to 730d for generational crashes. Uses Position Reserve
     # Manager for tranche exits (+10/+15/+20%) instead of flat profit_target.
     "accumulator_v3": {
-        "drop_trigger_pct":         0.03,   # tightened: catches slow grinds like #93 (-38% over 55d)
-        "deploy_pct":               0.035,  # smaller per-buy to spread capital across more buys
-        "max_deploy_pct":           0.60,
-        "velocity_halt_pct":        0.08,   # relaxed: was 0.07, allows more buys on fast crashes like #76
-        "velocity_lookback_bars":   48,
-        "support_levels":           3,
-        "support_bonus_pct":        0.015,
+        "drop_trigger_pct":           0.03,    # tightened: catches slow grinds like #93 (-38% over 55d)
+        "deploy_pct":                 0.035,   # smaller per-buy to spread capital across more buys
+        "max_deploy_pct":             0.60,
+        "velocity_halt_pct":          0.08,    # relaxed: was 0.07, allows more buys on fast crashes like #76
+        "velocity_lookback_bars":     48,
+        "support_levels":             3,
+        "support_bonus_pct":          0.015,
         # Depth-adaptive emergency behaviour
-        "emergency_drawdown_pct":   0.45,   # threshold to trigger action
-        "emergency_action":         "HOLD", # HOLD not SELL when depth>35%
-        "catastrophic_depth_pct":   0.35,   # if crash >35% from start -> HOLD mode
-        "max_accum_depth_pct":      0.35,   # stop new buys beyond this crash depth
-        # Depth-tiered hold periods
-        "max_hold_days_shallow":    120,   # <5% depth
-        "max_hold_days_moderate":   180,   # 5-15% depth
-        "max_hold_days_major":      365,   # 15-35% depth
-        "max_hold_days_catastrophic": 730,   # >35% — ETH needs ~22mo
-        "max_hold_days_moderate":   180,   # 10-35% depth
-        "max_hold_days_major":      365,   # 15-35% depth (bumped from 270)
-        "max_hold_days_catastrophic": 730,  # >35% depth — ETH ~22mo to recover
+        "emergency_drawdown_pct":     0.45,    # threshold to trigger action
+        "emergency_action":           "HOLD",  # HOLD not SELL when depth>35%
+        "catastrophic_depth_pct":     0.35,    # if crash >35% from start -> HOLD mode
+        "max_accum_depth_pct":        0.35,    # stop new buys beyond this crash depth
+        # Depth-tiered hold periods (no duplicate keys)
+        "max_hold_days_shallow":      120,     # <5% depth
+        "max_hold_days_moderate":     180,     # 5-15% depth
+        "max_hold_days_major":        365,     # 15-35% depth
+        "max_hold_days_catastrophic": 730,     # >35% depth — ETH ~22mo to recover
         # Exit via Position Reserve Manager tranches (not flat profit_target)
-        "use_reserve_manager":      True,
-        "tranche_t1_pct":           0.10,   # sell 33% at +10%
-        "tranche_t2_pct":           0.15,   # sell 33% at +15%
-        "tranche_t3_pct":           0.20,   # sell rest at +20%
+        "use_reserve_manager":        True,
+        "tranche_t1_pct":             0.10,    # sell 33% at +10%
+        "tranche_t2_pct":             0.15,    # sell 33% at +15%
+        "tranche_t3_pct":             0.20,    # sell rest at +20%
         # Override exits (bird in hand)
-        "ovr2_correction_pct":      0.08,   # exit all if CORRECTION + unrealized>8%
-        "ovr3_days_pct":            0.07,   # exit all if held>90d + unrealized>7%
+        "ovr2_correction_pct":        0.08,    # exit all if CORRECTION + unrealized>8%
+        "ovr3_days_pct":              0.07,    # exit all if held>90d + unrealized>7%
         # profit_target_pct = T1 threshold; full tranche ladder via PRM post-run
-        "profit_target_pct":        0.05,   # exit flat at +5%; PRM handles T1/T2/T3 ladder
-        "fee_pct":                  0.00065,
+        "profit_target_pct":          0.05,    # exit flat at +5%; PRM handles T1/T2/T3 ladder
+        "fee_pct":                    0.00065,
     },
 }
 
@@ -169,7 +166,7 @@ class CrashAccumulator(BotInterface):
         self._equity_curve        = []
         self._buys                = []
         self._velocity_paused     = False
-        self._hold_recalculated  = False
+        self._hold_recalculated   = False
         self._hold_start_bar      = None
         self._state               = "IDLE"   # IDLE | ACTIVE | CAPPED | HOLDING | DONE
 
@@ -246,7 +243,7 @@ class CrashAccumulator(BotInterface):
                 # Runs here — in MANAGE block — so it executes even when FROZEN.
                 # SKIP ACCUMULATION would block it if placed there.
                 if (crash_end_ts is not None and ts > crash_end_ts
-                        and not getattr(self, "_hold_recalculated", False)):
+                        and not self._hold_recalculated):
                     self._hold_recalculated = True
                     if self._crash_start_price:
                         _depth = abs((close - self._crash_start_price)
@@ -263,6 +260,7 @@ class CrashAccumulator(BotInterface):
                         else:
                             max_hold_bars = int(
                                 p.get("max_hold_days_shallow", 120) * 288)
+
                 # Profit target
                 if close >= self._position.avg_entry * (1 + profit_target):
                     self._sell(i, df, close, "profit_target", fee_pct)
@@ -296,11 +294,12 @@ class CrashAccumulator(BotInterface):
                 self._state = "CAPPED"
                 continue
 
-            # ── CRASH-END GATE ───────────────────────────────────────────────────
+            # ── CRASH-END GATE ────────────────────────────────────────────────
             # Stops accumulation after crash window closes.
             # (Depth-tiered hold recalc is in MANAGE block, not here.)
             if crash_end_ts is not None and ts > crash_end_ts:
                 continue
+
             # ── CRASH DEPTH GATE ──────────────────────────────────────────────
             if self._crash_start_price:
                 depth = abs((close - self._crash_start_price) / self._crash_start_price)
@@ -385,21 +384,22 @@ class CrashAccumulator(BotInterface):
         self._hold_start_bar = None
 
     def _reset(self, capital: float) -> None:
-        self._cash            = float(capital)
-        self._capital         = float(capital)
-        self._position        = Position(symbol=self._symbol)
-        self._trades          = []
-        self._buys            = []
-        self._equity_curve    = []
-        self._total_spent     = 0.0
-        self._realized_pnl    = 0.0
-        self._trade_count     = 0
-        self._last_buy_price  = None
+        self._cash              = float(capital)
+        self._capital           = float(capital)
+        self._position          = Position(symbol=self._symbol)
+        self._trades            = []
+        self._buys              = []
+        self._equity_curve      = []
+        self._total_spent       = 0.0
+        self._realized_pnl      = 0.0
+        self._trade_count       = 0
+        self._last_buy_price    = None
         self._crash_start_price = None
-        self._support_levels  = []
-        self._velocity_paused = False
-        self._hold_start_bar  = None
-        self._state           = "IDLE"
+        self._support_levels    = []
+        self._velocity_paused   = False
+        self._hold_recalculated = False   # ← cleared each window so recalc fires fresh
+        self._hold_start_bar    = None
+        self._state             = "IDLE"
 
     def _build_result(self, capital: float, preset_name: str) -> tuple:
         if not self._trades:
@@ -410,9 +410,9 @@ class CrashAccumulator(BotInterface):
         vel_pauses    = sum(1 for b in self._buys if b.get("velocity_paused"))
 
         sells = tdf[tdf["side"] == "SELL"]
-        profit_exits   = len(sells[sells["reason"] == "profit_target"])
+        profit_exits    = len(sells[sells["reason"] == "profit_target"])
         emergency_exits = len(sells[sells["reason"] == "emergency_exit"])
-        time_stops     = len(sells[sells["reason"] == "time_stop"])
+        time_stops      = len(sells[sells["reason"] == "time_stop"])
 
         discount_pct = 0.0
         if self._crash_start_price and self._position.avg_entry > 0:
