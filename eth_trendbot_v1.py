@@ -7,7 +7,8 @@ Signal : uptrend_pb — RSI pullback in h1 UPTREND
 Exit : target_bps fixed profit target (limit order = maker fill)
 Safety : pos_stop_loss_pct (5%) — tight, fail fast (market = taker fill)
 DCA : NONE — one fill per position, orchestrator adds capital
-Size : fixed base_qty ETH per trade
+Size : base_qty scaled by trend_strength (qty_scale) — risk management only,
+       does not affect signal logic or entry/exit conditions
 
 Fee model:
   buy_fee_pct  = 0.00065  (taker — aggressive market buy on pullback signal)
@@ -17,9 +18,13 @@ Fee model:
 
 psl_cooldown_secs:
   After a pos_stop_loss exit, the bot locks out new entries for this duration.
-  This prevents re-entering a choppy/reversing regime immediately after being
-  stopped out, which is the primary driver of PSL clustering in volatile windows.
-  Separate from the normal cooldown_secs which applies after any entry.
+  Prevents re-entering a choppy/reversing regime immediately after being stopped out.
+
+qty_scale:
+  Scales base_qty by trend_strength regime. This is pure position sizing —
+  it does not filter entries or change signal conditions. MODERATE gets 0.5x
+  to cap drawdown in historically weaker conditions without removing those
+  windows from the sample entirely.
 
 Design principle: do ONE thing well.
 This bot only fires when the 1h trend is UP and price pulls back.
@@ -44,17 +49,22 @@ warnings.filterwarnings("ignore")
 PRESETS = {
     "trendbot_v1": {
         "base_qty":           0.05,
-        "target_bps":         180,      # must clear 90 bps round-trip fee (2x buffer)
-        "pos_stop_loss_pct":  0.05,     # 5% PSL — R ratio = 1:3.6 vs 180 bps target
-        "uptrend_rsi_max":    44,       # RSI must be below 44 (pullback)
-        "vol_mult_min":       0.80,     # volume confirmation
-        "cooldown_secs":      1800,     # 30 min between normal entries
+        "target_bps":         180,
+        "pos_stop_loss_pct":  0.05,
+        "uptrend_rsi_max":    44,
+        "vol_mult_min":       0.80,
+        "cooldown_secs":      1800,
         "psl_cooldown_secs":  7200,     # 2h lockout after any stop-loss exit
-        "min_profit_bps":     100,      # entry gate: expected profit must clear fees
-        "zscore_max":        -0.6,      # deeper pullback required
-        "uptrend_bars_min":   0,        # disabled — psl_cooldown handles chop better
-        "buy_fee_pct":        0.00065,  # taker fill on entry
-        "sell_fee_pct":       0.00025,  # maker fill on limit target exit
+        "min_profit_bps":     100,
+        "zscore_max":        -0.6,
+        "uptrend_bars_min":   0,
+        "qty_scale": {
+            "STRONG":    1.0,
+            "PARABOLIC": 1.0,
+            "MODERATE":  0.5,           # half size on MODERATE — risk management only
+        },
+        "buy_fee_pct":        0.00065,
+        "sell_fee_pct":       0.00025,
     },
     "trendbot_v1_aggressive": {
         "base_qty":           0.05,
@@ -63,10 +73,15 @@ PRESETS = {
         "uptrend_rsi_max":    48,
         "vol_mult_min":       0.70,
         "cooldown_secs":      1200,
-        "psl_cooldown_secs":  3600,     # 1h lockout after stop-loss
+        "psl_cooldown_secs":  3600,
         "min_profit_bps":     120,
         "zscore_max":        -0.5,
         "uptrend_bars_min":   0,
+        "qty_scale": {
+            "STRONG":    1.0,
+            "PARABOLIC": 1.0,
+            "MODERATE":  0.5,
+        },
         "buy_fee_pct":        0.00065,
         "sell_fee_pct":       0.00025,
     },
@@ -135,10 +150,11 @@ class TrendBot(BotInterface):
         rsi_max          = p["uptrend_rsi_max"]
         vol_min          = p["vol_mult_min"]
         cooldown         = p["cooldown_secs"]
-        psl_cooldown     = p.get("psl_cooldown_secs", cooldown)  # default = normal cooldown
+        psl_cooldown     = p.get("psl_cooldown_secs", cooldown)
         min_profit       = p.get("min_profit_bps", 0)
         zscore_max       = p.get("zscore_max", -0.3)
         uptrend_bars_min = p.get("uptrend_bars_min", 0)
+        qty_scale_map    = p.get("qty_scale", {})
 
         uptrend_streak = 0
 
@@ -167,7 +183,7 @@ class TrendBot(BotInterface):
                     self._sell(i, df, close, "target", sell_fee_pct)
                     continue
 
-                continue  # position open, no exit triggered — hold
+                continue
 
             # ── SCAN FOR ENTRY (position flat) ────────────────────────
             if regime != "UPTREND":
@@ -185,27 +201,26 @@ class TrendBot(BotInterface):
             zscore   = float(row.get("zscore", 0))
             vol_r    = float(row.get("vol_ratio", 1))
 
-            # standard cooldown after any entry
             in_cooldown = (self._last_buy_ts is not None and
                            (ts - self._last_buy_ts).total_seconds() < cooldown)
             if in_cooldown:
                 continue
 
-            # extended lockout after a stop-loss exit
             in_psl_cooldown = (self._last_psl_ts is not None and
                                (ts - self._last_psl_ts).total_seconds() < psl_cooldown)
             if in_psl_cooldown:
                 continue
 
-            # uptrend_pb: RSI pullback with volume in confirmed h1 UPTREND
             if (rsi      < rsi_max
                     and rsi    < rsi_prev
                     and zscore < zscore_max
                     and vol_r  >= vol_min):
-                self._buy(i, df, close, "uptrend_pb", base_qty,
+                # scale qty by trend strength — risk management, not signal filtering
+                strength     = str(row.get("trend_strength", "STRONG"))
+                effective_qty = base_qty * qty_scale_map.get(strength, 1.0)
+                self._buy(i, df, close, "uptrend_pb", effective_qty,
                           buy_fee_pct, target_bps, min_profit, sell_fee_pct)
 
-        # Close any open position at period end
         if self._position.is_open:
             self._sell(len(df) - 1, df, float(df.iloc[-1]["close"]),
                        "end_of_period", sell_fee_pct)
@@ -226,10 +241,10 @@ class TrendBot(BotInterface):
         self._last_buy_ts  = None
         self._last_psl_ts  = None
 
-    def _buy(self, i, df, close, reason, base_qty, buy_fee_pct,
+    def _buy(self, i, df, close, reason, qty, buy_fee_pct,
              target_bps, min_profit, sell_fee_pct):
         row = df.iloc[i]
-        bv  = base_qty * close
+        bv  = qty * close
         if bv > self._cash:
             return
         round_trip_fee = bv * (buy_fee_pct + sell_fee_pct)
@@ -239,11 +254,11 @@ class TrendBot(BotInterface):
 
         fee = bv * buy_fee_pct
         self._cash               -= bv + fee
-        self._position.qty        = base_qty
+        self._position.qty        = qty
         self._position.avg_entry  = close
         self._position.peak_price = close
         self._position.entry_bar  = i
-        self._position.lots = [Lot(qty=base_qty, price=close,
+        self._position.lots = [Lot(qty=qty, price=close,
                                    fee=fee, ts=row["ts"],
                                    row_idx=len(self._trades))]
         self._last_buy_ts = row["ts"]
@@ -254,7 +269,7 @@ class TrendBot(BotInterface):
             "reason":    reason,
             "regime_h1": str(row.get("regime_h1", "")),
             "price":     close,
-            "qty":       base_qty,
+            "qty":       qty,
             "fee":       fee,
             "rsi":       float(df["rsi"].iat[i]) if not pd.isna(df["rsi"].iat[i]) else float("nan"),
             "zscore":    float(row.get("zscore",    float("nan"))),
@@ -273,11 +288,9 @@ class TrendBot(BotInterface):
         self._cumulative += pnl
         bh = i - p.entry_bar
 
-        # record PSL timestamp for extended post-stop lockout
         if reason == "pos_stop_loss":
             self._last_psl_ts = row["ts"]
 
-        # Back-fill the BUY row
         buy_row = self._trades[p.lots[0].row_idx]
         buy_row.update({
             "pnl": pnl, "pnl_after_fees": pnl,
