@@ -123,6 +123,10 @@ def fetch_ohlcv(symbol, timeframe, since_dt, until_dt, use_cache=True):
     Historical ranges (until_dt > 24h ago) are cached to ./ohlcv_cache/ and
     served instantly on subsequent calls — no network round-trips.
     Set use_cache=False to force a live fetch (e.g. for current-day data).
+
+    Thread-safe: uses a per-file lock to prevent parallel workers from
+    writing the same cache file simultaneously (race condition fix).
+    Requires: pip install filelock
     """
     key = _cache_key(symbol, timeframe, since_dt, until_dt)
     cache_file = _CACHE_DIR / f"{key}.parquet"
@@ -139,10 +143,20 @@ def fetch_ohlcv(symbol, timeframe, since_dt, until_dt, use_cache=True):
     # ── Live fetch ────────────────────────────────────────────────────────────
     df = _fetch_ohlcv_live(symbol, timeframe, since_dt, until_dt)
 
-    # ── Cache write (historical only) ─────────────────────────────────────────
+    # ── Cache write (historical only, file-locked for thread safety) ──────────
     if use_cache and historical and df is not None and len(df) > 0:
         try:
-            df.to_parquet(cache_file, index=False)
+            try:
+                from filelock import FileLock
+                lock = FileLock(str(cache_file) + ".lock", timeout=30)
+                with lock:
+                    if not cache_file.exists():  # double-check inside lock
+                        df.to_parquet(cache_file, index=False)
+            except ImportError:
+                # filelock not installed — fallback to unprotected write
+                # (safe on single-worker runs; install filelock for parallel)
+                if not cache_file.exists():
+                    df.to_parquet(cache_file, index=False)
         except Exception as e:
             print(f"[CACHE] Warning: could not write cache: {e}", file=sys.stderr)
 

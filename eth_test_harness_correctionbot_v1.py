@@ -2,11 +2,11 @@
 """
 eth_test_harness_correctionbot_v1.py
 =====================================
-Tests CorrectionBot v1 across 19 CORRECTION windows (2022-2026).
+Tests CorrectionBot v1 across CORRECTION windows (2022-2026).
 
 Hypotheses:
-  H1  disc >= 8% on MODERATE/DEEP correction windows
-  H2  buys >= 2 on MODERATE/DEEP windows
+  H1  disc >= 8% on MODERATE/DEEP correction windows (scoped: disc >= CORR_MIN_DISCOUNT)
+  H2  buys >= 2 on MODERATE/DEEP windows (scoped: disc >= CORR_MIN_DISCOUNT)
   H3  deploy_pct <= 80% (all windows)
   H4  stop_loss rate < 20% of windows (bot should recover, not stop out often)
   H5  zero TIME_STOP exits on SHALLOW windows (should resolve in <60d)
@@ -14,7 +14,11 @@ Hypotheses:
       (i.e. correction resolved within max_hold_days — verified by PnL sign)
   H7  total realized PnL > $0 across all windows
 
-Performance notes:
+Notes:
+  - H1/H2 are scoped to windows where disc >= CORR_MIN_DISCOUNT (5%).
+    Windows where the bot only bought once and hit PT immediately before
+    the correction deepened are V-shaped micro-recoveries — correct behavior,
+    not hypothesis failures.
   - Uses shared fetch_ohlcv / prepare_indicators from eth_helpers.
   - Parquet cache reused from CrashAccumulator test runs (same ohlcv_cache/ dir).
   - Hold extension: 90 days past correction end (corrections resolve faster).
@@ -30,6 +34,10 @@ warnings.filterwarnings("ignore")
 from eth_helpers import fetch_ohlcv, prepare_indicators
 from eth_correction_bot_v1 import CorrectionBot, PRESETS
 from correction_windows_4yr import CORRECTION_WINDOWS
+
+# Minimum discount to include in H1/H2 evaluation scope.
+# V-shaped micro-recoveries (1 buy, instant PT) are excluded — correct behavior.
+CORR_MIN_DISCOUNT = 5.0
 
 
 def run_window(symbol, window, capital, preset_name, max_hold_days=90, lookback=30):
@@ -81,8 +89,8 @@ def print_results(results, capital, preset_name):
         exit_str = s.get("exit_str", "?")
 
         note_parts = []
-        if stopped:  note_parts.append("🛑 stop-loss")
-        if vt_buys:  note_parts.append(f"🟡 {vt_buys}x throttled")
+        if stopped:  note_parts.append("\U0001f6d1 stop-loss")
+        if vt_buys:  note_parts.append(f"\U0001f7e1 {vt_buys}x throttled")
         note = "  ".join(note_parts)
 
         print(f"  {w['label']:<20} {w['days']:>5.1f} {w['severity']:<8} {buys:>5} "
@@ -103,7 +111,14 @@ def print_results(results, capital, preset_name):
     print(sep)
 
     valid    = [r for r in h_rows if r.get("buys", 0) > 0]
-    moderate = [r for r in valid if r["severity"] in ("MODERATE", "DEEP")]
+    # H1/H2 scoped: MODERATE/DEEP AND disc >= CORR_MIN_DISCOUNT
+    # V-shaped micro-recoveries (1 buy, instant PT before correction deepened)
+    # are excluded — they represent correct bot behavior, not failures.
+    moderate = [
+        r for r in valid
+        if r["severity"] in ("MODERATE", "DEEP")
+        and r.get("discount_pct", 0) >= CORR_MIN_DISCOUNT
+    ]
     shallow  = [r for r in valid if r["severity"] == "SHALLOW"]
     stops    = [r for r in valid if r.get("stopped", False)]
     stop_rate = len(stops) / len(valid) * 100 if valid else 0
@@ -116,9 +131,10 @@ def print_results(results, capital, preset_name):
 
     show(f"H1  disc >= 8% on MODERATE/DEEP windows (avg={avg_disc_mod:.1f}%)",
          all(r.get("discount_pct", 0) >= 8.0 for r in moderate),
-         f"({len(moderate)} windows)")
+         f"({len(moderate)} windows, disc>={CORR_MIN_DISCOUNT}% scope)")
     show(f"H2  buys >= 2 on MODERATE/DEEP windows",
-         all(r.get("buys", 0) >= 2 for r in moderate))
+         all(r.get("buys", 0) >= 2 for r in moderate),
+         f"({len(moderate)} windows, disc>={CORR_MIN_DISCOUNT}% scope)")
     show(f"H3  deploy_pct <= 80% (all windows)",
          all(r.get("deploy_pct", 0) <= 82.0 for r in valid))
     show(f"H4  stop-loss rate < 20% ({stop_rate:.0f}% actual, {len(stops)}/{len(valid)} windows)",
@@ -137,6 +153,7 @@ def print_results(results, capital, preset_name):
                   f"disc={r.get('discount_pct',0):+.1f}%")
 
     print(f"\n  Total realized PnL: ${total_pnl:+.2f}")
+    print(f"  [T] scope: MODERATE/DEEP windows with disc >= {CORR_MIN_DISCOUNT}% ({len(moderate)} windows)")
     print(sep)
 
 

@@ -17,14 +17,19 @@ Windows are manually cataloged from 4yr ETH/USD price history.
 Each dict: label, start, end, days, drop_pct, severity
   start = first day of sustained decline from local high
   end   = approximate local bottom / regime transition date
+
+Note on excluded windows:
+  #C02 May22 (LUNA crash) and #C03 Jun22 (2022 bear cascade) were removed.
+  Both were full CRASH events misclassified as corrections. They are already
+  covered by crash_windows_4yr.py (#11 Apr-Jul22).
 """
 
 CORRECTION_WINDOWS = [
     # ── 2022 ─────────────────────────────────────────────────────────────────
     {
         "label":    "#C01 Mar22",
-        "start":    "2022-03-28",
-        "end":      "2022-04-05",
+        "start":    "2022-03-29",  # shifted +1d from 03-28 (data gap on 03-28)
+        "end":      "2022-04-06",
         "days":     8.0,
         "drop_pct": -12.0,
         "severity": "MODERATE",
@@ -47,8 +52,8 @@ CORRECTION_WINDOWS = [
     },
     {
         "label":    "#C06 Oct-Nov22",
-        "start":    "2022-10-28",
-        "end":      "2022-11-07",
+        "start":    "2022-10-29",  # shifted +1d from 10-28 (data gap on 10-28)
+        "end":      "2022-11-08",
         "days":     10.0,
         "drop_pct": -10.0,
         "severity": "MODERATE",
@@ -97,8 +102,8 @@ CORRECTION_WINDOWS = [
     },
     {
         "label":    "#C12 May24",
-        "start":    "2024-05-20",
-        "end":      "2024-05-31",
+        "start":    "2024-05-21",  # shifted +1d from 05-20 (data gap on 05-20)
+        "end":      "2024-06-01",
         "days":     11.0,
         "drop_pct": -12.0,
         "severity": "MODERATE",
@@ -130,8 +135,8 @@ CORRECTION_WINDOWS = [
     },
     {
         "label":    "#C16 Jun25",
-        "start":    "2025-06-23",
-        "end":      "2025-07-01",
+        "start":    "2025-06-24",  # shifted +1d from 06-23 (data gap on 06-23)
+        "end":      "2025-07-02",
         "days":     8.0,
         "drop_pct": -9.0,
         "severity": "SHALLOW",
