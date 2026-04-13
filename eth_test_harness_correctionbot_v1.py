@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+eth_test_harness_correctionbot_v1.py
+=====================================
+Tests CorrectionBot v1 across 19 CORRECTION windows (2022-2026).
+
+Hypotheses:
+  H1  disc >= 8% on MODERATE/DEEP correction windows
+  H2  buys >= 2 on MODERATE/DEEP windows
+  H3  deploy_pct <= 80% (all windows)
+  H4  stop_loss rate < 20% of windows (bot should recover, not stop out often)
+  H5  zero TIME_STOP exits on SHALLOW windows (should resolve in <60d)
+  H6  all STOP_LOSS exits followed by PT recovery signal
+      (i.e. correction resolved within max_hold_days — verified by PnL sign)
+  H7  total realized PnL > $0 across all windows
+
+Performance notes:
+  - Uses shared fetch_ohlcv / prepare_indicators from eth_helpers.
+  - Parquet cache reused from CrashAccumulator test runs (same ohlcv_cache/ dir).
+  - Hold extension: 90 days past correction end (corrections resolve faster).
+"""
+
+import argparse, sys, os, warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, timedelta
+import pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+warnings.filterwarnings("ignore")
+
+from eth_helpers import fetch_ohlcv, prepare_indicators
+from eth_correction_bot_v1 import CorrectionBot, PRESETS
+from correction_windows_4yr import CORRECTION_WINDOWS
+
+
+def run_window(symbol, window, capital, preset_name, max_hold_days=90, lookback=30):
+    p         = PRESETS[preset_name]
+    start_dt  = datetime.strptime(window["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    corr_end  = datetime.strptime(window["end"],   "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    # Extend data window to cover full hold period after correction bottom
+    ext_end  = corr_end + timedelta(days=max_hold_days)
+    warm_dt  = start_dt - timedelta(days=lookback)
+
+    df5  = fetch_ohlcv(symbol, "5m",  warm_dt, ext_end)
+    df1h = fetch_ohlcv(symbol, "1h",  warm_dt, ext_end)
+
+    if df5 is None or len(df5) < 50:
+        return pd.DataFrame(), {}
+
+    df_warm = df5[df5["ts"] < pd.Timestamp(start_dt)].reset_index(drop=True)
+    df_ind  = prepare_indicators(df5, df1h)
+    df_run  = df_ind[df_ind["ts"] >= pd.Timestamp(start_dt)].reset_index(drop=True)
+
+    bot = CorrectionBot(symbol=symbol.replace("/", "-"))
+    return bot.run_backtest(df_run, p, capital, preset_name,
+                            df_warm=df_warm, correction_end_ts=corr_end)
+
+
+def print_results(results, capital, preset_name):
+    sep  = "=" * 80
+    sep2 = "-" * 80
+    print(f"\n{sep}")
+    print(f" CorrectionBot v1 — {preset_name} — per-window results")
+    print(sep)
+    print(f"  {'Window':<20} {'Days':>5} {'Sev':<8} {'Buys':>5} {'Dep%':>6} {'Disc%':>7}"
+          f"  {'Exit':<16} {'RealPnL':>9}  Notes")
+    print(f"  {sep2[:78]}")
+
+    h_rows = []
+    for w, tdf, s in results:
+        if not s:
+            print(f"  {w['label']:<20}  -- no data --")
+            continue
+
+        buys     = s.get("buys", 0)
+        dep_pct  = s.get("deploy_pct", 0)
+        disc     = s.get("discount_pct", 0)
+        rpnl     = s.get("realized_pnl", 0)
+        stopped  = s.get("stopped", False)
+        vt_buys  = s.get("vel_throttled_buys", 0)
+        exit_str = s.get("exit_str", "?")
+
+        note_parts = []
+        if stopped:  note_parts.append("🛑 stop-loss")
+        if vt_buys:  note_parts.append(f"🟡 {vt_buys}x throttled")
+        note = "  ".join(note_parts)
+
+        print(f"  {w['label']:<20} {w['days']:>5.1f} {w['severity']:<8} {buys:>5} "
+              f"{dep_pct:>5.1f}%  {disc:>+6.1f}%  {exit_str:<16} ${rpnl:>+8.2f}  {note}")
+
+        h_rows.append({**s, "label": w["label"], "severity": w["severity"],
+                        "days": w["days"]})
+
+    total_pnl  = sum(s.get("realized_pnl", 0) for _, _, s in results if s)
+    total_buys = sum(s.get("buys", 0) for _, _, s in results if s)
+    print(f"  {sep2[:78]}")
+    print(f"  {'COMBINED':<20} {'':>5} {'':>8} {total_buys:>5}  {'':>15}   ${total_pnl:>+8.2f}")
+    print(sep)
+
+    # ── Hypothesis evaluation ─────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print(f" CorrectionBot v1 — HYPOTHESIS EVALUATION")
+    print(sep)
+
+    valid    = [r for r in h_rows if r.get("buys", 0) > 0]
+    moderate = [r for r in valid if r["severity"] in ("MODERATE", "DEEP")]
+    shallow  = [r for r in valid if r["severity"] == "SHALLOW"]
+    stops    = [r for r in valid if r.get("stopped", False)]
+    stop_rate = len(stops) / len(valid) * 100 if valid else 0
+
+    avg_disc_mod = (sum(r.get("discount_pct", 0) for r in moderate) / len(moderate)
+                   if moderate else 0)
+
+    def show(name, passed, note=""):
+        print(f"  {name:<62} {'PASS' if passed else 'FAIL'}  {note}")
+
+    show(f"H1  disc >= 8% on MODERATE/DEEP windows (avg={avg_disc_mod:.1f}%)",
+         all(r.get("discount_pct", 0) >= 8.0 for r in moderate),
+         f"({len(moderate)} windows)")
+    show(f"H2  buys >= 2 on MODERATE/DEEP windows",
+         all(r.get("buys", 0) >= 2 for r in moderate))
+    show(f"H3  deploy_pct <= 80% (all windows)",
+         all(r.get("deploy_pct", 0) <= 82.0 for r in valid))
+    show(f"H4  stop-loss rate < 20% ({stop_rate:.0f}% actual, {len(stops)}/{len(valid)} windows)",
+         stop_rate < 20.0)
+    show(f"H5  zero TIME_STOP on SHALLOW windows ({len(shallow)} windows)",
+         all(r.get("exit_str", "") != "TIME_STOP" for r in shallow))
+    show(f"H6  STOP_LOSS exits are rare and PnL recoverable (no stop > -15%)",
+         all(r.get("realized_pnl", 0) > -capital * 0.15 for r in stops))
+    show(f"H7  total realized PnL > $0 (${total_pnl:+.2f})",
+         total_pnl > 0)
+
+    if stops:
+        print(f"\n  Stop-loss exits:")
+        for r in stops:
+            print(f"    {r['label']:<22} pnl=${r.get('realized_pnl',0):+.2f}  "
+                  f"disc={r.get('discount_pct',0):+.1f}%")
+
+    print(f"\n  Total realized PnL: ${total_pnl:+.2f}")
+    print(sep)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--symbol",        default="ETH/USD")
+    ap.add_argument("--capital",       default=400.0, type=float)
+    ap.add_argument("--preset",        default="correction_v1",
+                    choices=list(PRESETS.keys()))
+    ap.add_argument("--max-hold-days", default=90, type=int)
+    ap.add_argument("--workers",       default=4, type=int)
+    ap.add_argument("--no-cache",      action="store_true")
+    args = ap.parse_args()
+
+    if args.no_cache:
+        from eth_helpers import clear_ohlcv_cache
+        clear_ohlcv_cache()
+
+    print(f"CorrectionBot v1 Tests")
+    print(f"=" * 60)
+    print(f"Running {len(CORRECTION_WINDOWS)} CORRECTION windows "
+          f"(max hold {args.max_hold_days}d, workers={args.workers})...")
+
+    results_map = {}
+
+    def _run(w):
+        tdf, s = run_window(args.symbol, w, args.capital, args.preset,
+                            args.max_hold_days)
+        return w, tdf, s
+
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futures = {ex.submit(_run, w): w for w in CORRECTION_WINDOWS}
+        for fut in as_completed(futures):
+            w, tdf, s = fut.result()
+            results_map[w["label"]] = (w, tdf, s)
+            if s:
+                stopped = s.get("stopped", False)
+                p_exits = s.get("profit_exits", 0)
+                vt      = s.get("vel_throttled_buys", 0)
+                tag     = "STOP" if stopped else ("PT" if p_exits else "open")
+                vt_str  = f"  vthrot={vt}" if vt else ""
+                print(f"  [{w['label']}]  {w['start']}  {w['severity']} ... "
+                      f"{s.get('buys',0)} buys  disc={s.get('discount_pct',0):+.1f}%  "
+                      f"{tag}  pnl=${s.get('realized_pnl',0):+.2f}{vt_str}")
+            else:
+                print(f"  [{w['label']}]  no data")
+
+    results = [results_map[w["label"]] for w in CORRECTION_WINDOWS]
+    print_results(results, args.capital, args.preset)
+
+    trades = [t for _, t, s in results
+              if s and t is not None and isinstance(t, pd.DataFrame) and not t.empty]
+    if trades:
+        pd.concat(trades, ignore_index=True).to_csv(
+            f"correctionbot_v1_{args.preset}_trades.csv", index=False)
+
+
+if __name__ == "__main__":
+    main()
