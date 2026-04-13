@@ -4,10 +4,16 @@ eth_trendbot_v1.py — TrendBot (BULL / RECOVERY specialist)
 ==============================================================
 Role : Trades uptrend pullbacks during BULL and RECOVERY regimes only.
 Signal : uptrend_pb — RSI pullback in h1 UPTREND
-Exit : target_bps fixed profit target
-Safety : pos_stop_loss_pct (5%) — tight, fail fast
+Exit : target_bps fixed profit target (limit order = maker fill)
+Safety : pos_stop_loss_pct (5%) — tight, fail fast (market = taker fill)
 DCA : NONE — one fill per position, orchestrator adds capital
 Size : fixed base_qty ETH per trade
+
+Fee model:
+  buy_fee_pct  = 0.00065  (taker — aggressive market buy on pullback signal)
+  sell_fee_pct = 0.00025  (maker — limit order placed at target price)
+  round-trip   = 0.090%   = 90 bps
+  target_bps must be > 90 to break even; recommended >= 180 (2x fee buffer)
 
 Design principle: do ONE thing well.
 This bot only fires when the 1h trend is UP and price pulls back.
@@ -32,23 +38,27 @@ warnings.filterwarnings("ignore")
 PRESETS = {
     "trendbot_v1": {
         "base_qty":           0.05,
-        "target_bps":         35,       # 0.35% target — small but frequent
-        "pos_stop_loss_pct":  0.05,     # 5% tight PSL
+        "target_bps":         180,      # must clear 90 bps round-trip fee (2x buffer)
+        "pos_stop_loss_pct":  0.05,     # 5% PSL — R ratio = 1:3.6 vs 180 bps target
         "uptrend_rsi_max":    44,       # RSI must be below 44 (pullback)
         "vol_mult_min":       0.80,     # volume confirmation
-        "cooldown_secs":      600,      # 10 min between entries
-        "min_profit_bps":     25,       # min expected profit after fees
-        "fee_pct":            0.00065,
+        "cooldown_secs":      1800,     # 30 min between entries — reduces overtrading
+        "min_profit_bps":     100,      # entry gate: expected profit must clear fees
+        "zscore_max":        -0.6,      # deeper pullback required (was -0.3)
+        "buy_fee_pct":        0.00065,  # taker fill on entry
+        "sell_fee_pct":       0.00025,  # maker fill on limit target exit
     },
     "trendbot_v1_aggressive": {
         "base_qty":           0.05,
-        "target_bps":         50,
-        "pos_stop_loss_pct":  0.06,
+        "target_bps":         220,      # slightly wider target
+        "pos_stop_loss_pct":  0.06,     # 6% PSL
         "uptrend_rsi_max":    48,       # slightly looser RSI
         "vol_mult_min":       0.70,
-        "cooldown_secs":      300,
-        "min_profit_bps":     30,
-        "fee_pct":            0.00065,
+        "cooldown_secs":      1200,     # 20 min cooldown
+        "min_profit_bps":     120,
+        "zscore_max":        -0.5,      # slightly looser entry
+        "buy_fee_pct":        0.00065,
+        "sell_fee_pct":       0.00025,
     },
 }
 
@@ -106,14 +116,16 @@ class TrendBot(BotInterface):
         self._reset(capital)
         p = preset
 
-        fee_pct    = p["fee_pct"]
-        base_qty   = p["base_qty"]
-        target_bps = p["target_bps"]
-        psl_pct    = p["pos_stop_loss_pct"]
-        rsi_max    = p["uptrend_rsi_max"]
-        vol_min    = p["vol_mult_min"]
-        cooldown   = p["cooldown_secs"]
-        min_profit = p.get("min_profit_bps", 0)
+        buy_fee_pct  = p.get("buy_fee_pct",  p.get("fee_pct", 0.00065))  # taker
+        sell_fee_pct = p.get("sell_fee_pct", p.get("fee_pct", 0.00025))  # maker
+        base_qty     = p["base_qty"]
+        target_bps   = p["target_bps"]
+        psl_pct      = p["pos_stop_loss_pct"]
+        rsi_max      = p["uptrend_rsi_max"]
+        vol_min      = p["vol_mult_min"]
+        cooldown     = p["cooldown_secs"]
+        min_profit   = p.get("min_profit_bps", 0)
+        zscore_max   = p.get("zscore_max", -0.3)  # default preserves old behavior
 
         for i in range(len(df)):
             row    = df.iloc[i]
@@ -128,11 +140,11 @@ class TrendBot(BotInterface):
                 unreal = (close - self._position.avg_entry) / self._position.avg_entry
 
                 if unreal < -psl_pct:
-                    self._sell(i, df, close, "pos_stop_loss", fee_pct)
+                    self._sell(i, df, close, "pos_stop_loss", sell_fee_pct)
                     continue
 
                 if close >= self._position.avg_entry * (1 + target_bps / 10_000):
-                    self._sell(i, df, close, "target", fee_pct)
+                    self._sell(i, df, close, "target", sell_fee_pct)
                     continue
 
                 continue  # position open, no exit triggered — hold
@@ -157,16 +169,16 @@ class TrendBot(BotInterface):
 
             # uptrend_pb: RSI pullback with volume in h1 UPTREND
             if (rsi      < rsi_max
-                    and rsi  < rsi_prev       # RSI falling — active pullback
-                    and zscore < -0.3         # price below short-term mean
+                    and rsi    < rsi_prev     # RSI falling — active pullback
+                    and zscore < zscore_max   # price meaningfully below short-term mean
                     and vol_r  >= vol_min):
                 self._buy(i, df, close, "uptrend_pb", base_qty,
-                          fee_pct, target_bps, min_profit)
+                          buy_fee_pct, target_bps, min_profit, sell_fee_pct)
 
         # Close any open position at period end
         if self._position.is_open:
             self._sell(len(df) - 1, df, float(df.iloc[-1]["close"]),
-                       "end_of_period", fee_pct)
+                       "end_of_period", sell_fee_pct)
 
         return self._build_result(capital, preset_name)
 
@@ -183,21 +195,25 @@ class TrendBot(BotInterface):
         self._trade_count  = 0
         self._last_buy_ts  = None
 
-    def _buy(self, i, df, close, reason, base_qty, fee_pct, target_bps, min_profit):
+    def _buy(self, i, df, close, reason, base_qty, buy_fee_pct,
+             target_bps, min_profit, sell_fee_pct):
         row = df.iloc[i]
         bv  = base_qty * close
         if bv > self._cash:
             return
-        expected = bv * (target_bps / 10_000)
-        if expected < bv * fee_pct * 2 * (1 + min_profit / 10_000):
+        # Entry gate: expected gross profit must clear both legs of fees + min_profit buffer
+        round_trip_fee = bv * (buy_fee_pct + sell_fee_pct)
+        expected_gross = bv * (target_bps / 10_000)
+        if expected_gross < round_trip_fee * (1 + min_profit / 10_000):
             return
 
-        fee = bv * fee_pct
-        self._cash             -= bv + fee
-        self._position.qty      = base_qty
-        self._position.avg_entry = close
+        fee = bv * buy_fee_pct
+        self._cash               -= bv + fee
+        self._position.qty        = base_qty
+        self._position.avg_entry  = close
         self._position.peak_price = close
         self._position.entry_bar  = i
+        self._position.cost_basis = bv + fee
         self._position.lots = [Lot(qty=base_qty, price=close,
                                    fee=fee, ts=row["ts"],
                                    row_idx=len(self._trades))]
@@ -219,11 +235,11 @@ class TrendBot(BotInterface):
             "exit_price": float("nan"),
         })
 
-    def _sell(self, i, df, close, reason, fee_pct):
+    def _sell(self, i, df, close, reason, sell_fee_pct):
         p        = self._position
         row      = df.iloc[i]
         sell_val = p.qty * close
-        sell_fee = sell_val * fee_pct
+        sell_fee = sell_val * sell_fee_pct
         pnl      = sell_val - sell_fee - p.cost_basis
         self._cumulative += pnl
         bh = i - p.entry_bar
