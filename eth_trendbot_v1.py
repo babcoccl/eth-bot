@@ -213,7 +213,7 @@ class TrendBot(BotInterface):
         self._position.avg_entry  = close
         self._position.peak_price = close
         self._position.entry_bar  = i
-        self._position.cost_basis = bv + fee
+        # cost_basis is a computed property on Position — set via lots only
         self._position.lots = [Lot(qty=base_qty, price=close,
                                    fee=fee, ts=row["ts"],
                                    row_idx=len(self._trades))]
