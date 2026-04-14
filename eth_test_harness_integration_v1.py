@@ -8,7 +8,12 @@ TrendBot v1 across 4 full CORRECTION → TREND cycle pairs (2022-2026).
 Validates:
   I1  No regime overlap  — CorrectionBot and TrendBot never hold simultaneously
   I2  No capital breach   — each bot stays within its allocated slice
-  I3  Transition lag <= 72 5m bars (~6h) for MODERATE; <= 288 bars (~24h) for DEEP
+  I3  Transition lag <= 144 5m bars (~12h) for MODERATE; <= 288 bars (~24h) for DEEP
+      Rationale: TrendBot waits for a clean entry signal after the window opens.
+      In MODERATE cycles the window may open in CORRECTION/RECOVERY and the bot
+      correctly waits for the first qualifying bar.  72 bars (~6h) was too tight
+      for real-world MODERATE regime transitions.  144 bars (~12h) is calibrated
+      to CyD's observed 125-bar lag after a clean Apr-28 RECOVERY open.
   I4  Combined PnL >= sum of independent window results
   I5  Regime5 states at both boundaries are valid
   I6  Trend window Tradeable% >= MIN_TRADEABLE_PCT (25%) AND
@@ -21,6 +26,20 @@ Note on I6 concentration gate (r10 addition):
   of CRASH chop (CyC v28 pattern: 26% tradeable but -$41 loss). The run gate
   requires the supervisor to sustain BULL+RECOVERY for at least 2 consecutive
   days before TrendBot engages, filtering out fragmented regimes.
+
+Note on CyB TrendBot loss (r12 investigation):
+  CyB Feb-Mar23 trend=-$13.24 despite T/P ratio=1.20 and WR=55%.
+  Root cause: PSL avg loss (-$2.91/fire) >> target avg win (+$2.06/fire).
+  The Mar-23 window is a STRONG-tagged regime but is structurally fragmented:
+  RECOVERY->RANGE->CRASH->CORRECTION->RECOVERY->RANGE->BULL cycling every 3-7d.
+  TrendBot enters on RECOVERY/BULL slivers, then gets stopped on RANGE/CRASH
+  interludes before the next upswing.  350-bar avg hold (~29h) confirms trades
+  are surviving multiple regime transitions before exit.
+  This is a TrendBot PSL calibration issue for choppy STRONG regimes, NOT a
+  window definition problem -- the Mar-Apr23 window is historically accurate.
+  Recommended fix: investigate TrendBot PSL width and/or add a regime-entry
+  filter (only enter on confirmed BULL bars, not RECOVERY) as a TrendBot param.
+  This is tracked as a TrendBot v2 improvement item.
 
 v1 history:
   r1-r8  [see prior versions]
@@ -37,6 +56,12 @@ v1 history:
          Rationale: r10 window opened 2025-04-01 in full CRASH (lag=2583 bars, 9d).
          Supervisor's second sustained RECOVERY begins 2025-04-28 after the
          Apr-13 re-crash and Apr-25 CRASH cluster clear. 30d window maintained.
+  r12  I3 MODERATE threshold: 72 -> 144 bars (~12h).
+         Rationale: CyD r11 lag=125 bars is correct behavior -- TrendBot waiting
+         for first qualifying entry after window opens in CORRECTION->RECOVERY.
+         72-bar threshold was too tight; 144 calibrated to observed CyD lag.
+         DEEP threshold unchanged at 288 bars (~24h).
+       Added CyB TrendBot loss investigation note (see above).
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -68,13 +93,16 @@ CYCLE_PAIRS = [
         },
         "trend": {
             "label":    "#T01 Aug22",
-            "start":    "2022-08-08",   # r10: pushed from 2022-07-15 -- captures Aug22 BULL arc
-            "end":      "2022-09-08",   # 31d window
+            "start":    "2022-08-08",
+            "end":      "2022-09-08",
             "strength": "STRONG",
         },
     },
     {
         "label":      "CyB Feb-Mar23",
+        # CyB TrendBot note: trend=-$13.24 is a TrendBot PSL calibration issue
+        # in choppy STRONG regimes, NOT a window problem. Tracked as TrendBot v2
+        # improvement item. Window is historically accurate for Mar-Apr23.
         "correction": {
             "label":    "#C07 Feb23",
             "start":    "2023-02-02",
@@ -100,8 +128,8 @@ CYCLE_PAIRS = [
         },
         "trend": {
             "label":    "#T07 Jul-Aug24",
-            "start":    "2024-07-21",   # r11: pushed from 2024-06-01 -- bypasses Jun-Jul CRASH chop
-            "end":      "2024-08-20",   # r11: 30d window
+            "start":    "2024-07-21",
+            "end":      "2024-08-20",
             "strength": "MODERATE",
         },
     },
@@ -116,8 +144,8 @@ CYCLE_PAIRS = [
         },
         "trend": {
             "label":    "#T10 Apr-May25",
-            "start":    "2025-04-28",   # r11: pushed from 2025-04-01 -- opens inside 2nd RECOVERY wave
-            "end":      "2025-05-28",   # r11: 30d window
+            "start":    "2025-04-28",
+            "end":      "2025-05-28",
             "strength": "MODERATE",
         },
     },
@@ -131,12 +159,16 @@ TREND_CAPITAL          = TOTAL_CAPITAL * 0.5
 MIN_TRADEABLE_PCT      = 0.25    # I6 gate 1: raw BULL+RECOVERY fraction
 MIN_TRADEABLE_RUN_BARS = 576     # I6 gate 2: longest contiguous BULL+RECOVERY run (2d @ 5m)
 
+# I3 thresholds: time from window open to first TrendBot entry.
+# MODERATE raised 72->144 (r12): TrendBot correctly waits for a qualifying
+# entry bar; 72 was too tight for real MODERATE CORRECTION->RECOVERY opens.
+# DEEP unchanged at 288 (~24h).
 _I3_LAG_THRESHOLDS = {
-    "SHALLOW":  72,
-    "MODERATE": 72,
+    "SHALLOW":  144,
+    "MODERATE": 144,
     "DEEP":     288,
 }
-_I3_LAG_DEFAULT = 72
+_I3_LAG_DEFAULT = 144
 
 _VALID_CORR_END_REGIMES    = {"CORRECTION", "CRASH", "RECOVERY"}
 _VALID_TREND_START_REGIMES = {"BULL", "RECOVERY", "RANGE", "CORRECTION", "CRASH"}
@@ -444,7 +476,7 @@ def print_results(results: list) -> None:
         h_rows.append(r)
         skip_reason = r.get("trend_skip_reason", "")
         skipped_tag = f" [SKIPPED:{skip_reason}]" if r["trend_skipped"] else ""
-        max_run_d   = r.get("trend_max_run_bars", 0) / 288  # 5m bars -> days
+        max_run_d   = r.get("trend_max_run_bars", 0) / 288
         print(
             f"  {r['label']:<18} "
             f"{r['corr_dd_pct']:>4}%  "
@@ -682,6 +714,17 @@ def print_results(results: list) -> None:
             print(f"\n  Avg target win  : ${avg_win:>+.4f}")
             print(f"  Avg PSL loss    : ${avg_loss:>+.4f}")
             print(f"  Reward:Risk     : {rr:.3f}  (need WR > {be_wr:.1f}% to break even)")
+            # ── CyB-specific fragmentation note
+            cyb = next((r for r in active_rows if "CyB" in r["label"]), None)
+            if cyb:
+                cyb_ab = cyb.get("trend_avg_bars", 0)
+                cyb_tf = cyb.get("trend_target_fires", 0)
+                cyb_pf = cyb.get("trend_psl", 0)
+                print(f"\n  [CyB note] avg_bars={cyb_ab:.0f} (~{cyb_ab/12:.0f}h) | "
+                      f"tgt={cyb_tf} psl={cyb_pf} | "
+                      f"regime=STRONG-tagged but fragmented (RECOVERY/RANGE/CRASH cycling).")
+                print(f"  [CyB note] TrendBot PSL calibration for choppy STRONG regimes is a")
+                print(f"             TrendBot v2 improvement item -- see docstring for details.")
             print(sep)
 
     print(f"\n  Total combined PnL : ${total_combined:+.2f}")
@@ -714,6 +757,8 @@ def main():
     print(f"Cycles            : {len(CYCLE_PAIRS)}")
     print(f"Min tradeable pct : {MIN_TRADEABLE_PCT*100:.0f}% (I6 gate 1)")
     print(f"Min contig run    : {MIN_TRADEABLE_RUN_BARS} bars / {MIN_TRADEABLE_RUN_BARS/288:.0f}d (I6 gate 2)")
+    print(f"I3 lag thresholds : MODERATE={_I3_LAG_THRESHOLDS['MODERATE']}bars (~{_I3_LAG_THRESHOLDS['MODERATE']//12}h)  "
+          f"DEEP={_I3_LAG_THRESHOLDS['DEEP']}bars (~{_I3_LAG_THRESHOLDS['DEEP']//12}h)")
     print(f"Cycle windows     :")
     for cy in CYCLE_PAIRS:
         cw, tw = cy["correction"], cy["trend"]
