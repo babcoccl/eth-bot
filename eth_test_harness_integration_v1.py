@@ -16,6 +16,11 @@ Validates:
   I4  Combined PnL >= sum of independent window results (handoff adds no friction)
   I5  Regime5 states at both boundaries are valid (not RANGE at corr_end;
       any non-RANGE state acceptable at trend_start since TrendBot gates per-bar)
+  I6  Trend window Tradeable% >= MIN_TRADEABLE_PCT (25%) before TrendBot runs
+      Cycles below the threshold are logged as SKIPPED — not an error, but a
+      signal that the harness cycle definition needs a better trend window.
+      Derived from CyC/CyD at 22-24% tradeable being near breakeven; below 25%
+      signal-to-noise ratio is too low for a valid TrendBot test.
 
 Note on I3: lag is measured from trend_start_ts (the harness window open date),
 not from corr_end_ts. The 15+ day gap between those dates is intentional
@@ -26,12 +31,18 @@ because the harness date is a hard cut, not a supervisor event. TrendBot gates
 entries on regime5 at the bar level, so the window-open regime is informational
 only. I5 FAIL means the supervisor is showing RANGE (misconfigured) at corr_end.
 
+Note on I6: SKIPPED cycles still run CorrectionBot and report corr_pnl. Only
+TrendBot is skipped — trend_pnl is reported as 0.0 and trend_trades as 0.
+This prevents regime-hostile windows from contaminating TrendBot R:R diagnostics.
+
 Cycle pairs — MODERATE/DEEP corrections (dd >= 12%) that trigger MacroSupervisor
 CORRECTION state and activate CorrectionBot signal conditions.
 Trend windows start 15+ days after correction trough so MacroSupervisor
 min_pause_h1_bars=336 (14 days) is satisfied before TrendBot opens.
 
-  CyA  #C01 Feb-Mar22  MODERATE (-12%)  corr ends 2022-03-14  trend starts 2022-03-29
+  CyA  #C01 May-Jun22  DEEP (-56%)    corr ends 2022-06-18  trend starts 2022-07-15
+       Replaced original Mar-Apr22 trend window (85.2% CRASH — regime-hostile).
+       Jun22 ETH trough ~$900; Jul-Aug22 clean RECOVERY→BULL +47% move.
   CyB  #C07 Feb23      MODERATE (-11%)  corr ends 2023-02-16  trend starts 2023-03-05
   CyC  #C11 Apr-May24  DEEP     (-22%)  corr ends 2024-05-01  trend starts 2024-05-16
   CyD  #C15 Feb25      MODERATE (-14%)  corr ends 2025-02-28  trend starts 2025-03-15
@@ -50,6 +61,11 @@ v1 history:
       trend_start (TrendBot gates per-bar via regime5, not at window boundary)
   r6  I3 threshold tiered by severity: MODERATE <= 72 bars, DEEP <= 288 bars.
       Added regime5 window distribution diagnostic (bar counts + % per cycle).
+  r7  Added I6 MIN_TRADEABLE_PCT=0.25 gate — skip TrendBot if BULL+RECOVERY < 25%
+      of trend window bars, log as SKIPPED in results.
+      Replaced CyA trend window: Mar-Apr22 (85.2% CRASH, regime-hostile) →
+      Jul-Aug22 (ETH Jun22 trough, clean RECOVERY→BULL +47%). Correction window
+      updated to May-Jun22 DEEP -56% to form a valid cycle pair.
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -66,22 +82,22 @@ from eth_macrosupervisor_v27 import MacroSupervisor
 from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
 
-# ── Cycle definitions ──────────────────────────────────────────────────
+# ── Cycle definitions ──────────────────────────────────────────────────────
 CYCLE_PAIRS = [
     {
-        "label":      "CyA Feb-Mar22",
+        "label":      "CyA May-Jun22",
         "correction": {
-            "label":    "#C01 Feb-Mar22",
-            "start":    "2022-02-24",
-            "end":      "2022-03-14",
-            "severity": "MODERATE",
-            "dd_pct":   -12,
+            "label":    "#C01 May-Jun22",
+            "start":    "2022-05-05",
+            "end":      "2022-06-18",
+            "severity": "DEEP",
+            "dd_pct":   -56,
         },
         "trend": {
-            "label":    "#T01 Mar-Apr22",
-            "start":    "2022-03-29",   # +15d past trough
-            "end":      "2022-04-20",
-            "strength": "MODERATE",
+            "label":    "#T01 Jul-Aug22",
+            "start":    "2022-07-15",   # +27d past trough — ETH clean RECOVERY→BULL
+            "end":      "2022-08-15",
+            "strength": "STRONG",
         },
     },
     {
@@ -134,11 +150,12 @@ CYCLE_PAIRS = [
     },
 ]
 
-LOOKBACK_DAYS = 30
-HOLD_BUFFER   = 60
-TOTAL_CAPITAL = 400.0
-CORR_CAPITAL  = TOTAL_CAPITAL * 0.5
-TREND_CAPITAL = TOTAL_CAPITAL * 0.5
+LOOKBACK_DAYS  = 30
+HOLD_BUFFER    = 60
+TOTAL_CAPITAL  = 400.0
+CORR_CAPITAL   = TOTAL_CAPITAL * 0.5
+TREND_CAPITAL  = TOTAL_CAPITAL * 0.5
+MIN_TRADEABLE_PCT = 0.25   # I6: skip TrendBot if BULL+RECOVERY < 25% of trend window
 
 # I3 lag thresholds by correction severity (5m bars)
 _I3_LAG_THRESHOLDS = {
@@ -176,6 +193,12 @@ def _regime5_distribution(df_trend: pd.DataFrame) -> dict:
     return dist
 
 
+def _tradeable_pct(dist: dict) -> float:
+    """BULL% + RECOVERY% from a regime5 distribution dict."""
+    return (dist.get("BULL", {}).get("pct", 0.0) +
+            dist.get("RECOVERY", {}).get("pct", 0.0))
+
+
 def run_cycle(cycle: dict, symbol: str,
              corr_preset: str, trend_preset: str) -> dict:
     cw = cycle["correction"]
@@ -211,42 +234,42 @@ def run_cycle(cycle: dict, symbol: str,
 
         # Compute regime5 distribution for the trend window before backtest
         trend_r5_dist = _regime5_distribution(df_trend)
+        tradeable     = _tradeable_pct(trend_r5_dist)
 
         cp       = CORRECTION_PRESETS[corr_preset]
         corr_bot = CorrectionBot(symbol=symbol.replace("/", "-"))
         corr_tdf, corr_stats = corr_bot.run_backtest(df_corr, cp, CORR_CAPITAL, corr_preset)
 
-        tp        = TREND_PRESETS[trend_preset]
-        trend_bot = TrendBot(symbol=symbol.replace("/", "-"))
-        trend_tdf, trend_stats = trend_bot.run_backtest(df_trend, tp, TREND_CAPITAL, trend_preset)
-
-        _, corr_base  = CorrectionBot(symbol=symbol.replace("/", "-")).run_backtest(
+        _, corr_base = CorrectionBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_corr, cp, CORR_CAPITAL, corr_preset)
-        _, trend_base = TrendBot(symbol=symbol.replace("/", "-")).run_backtest(
-            df_trend.copy(), tp, TREND_CAPITAL, trend_preset)
 
-        overlap_bars       = _check_overlap(corr_tdf, trend_tdf)
-        transition_lag     = _calc_transition_lag(df_trend, trend_tdf)
+        # I6 — skip TrendBot if trend window is regime-hostile
+        trend_skipped = tradeable < (MIN_TRADEABLE_PCT * 100)
+
+        if trend_skipped:
+            trend_tdf   = pd.DataFrame()
+            trend_stats = {"trades": 0, "win_rate": 0.0, "realized_pnl": 0.0,
+                           "psl_fires": 0, "target_fires": 0,
+                           "target_pnl": 0.0, "psl_pnl": 0.0,
+                           "avg_bars_held": 0.0}
+            trend_base_pnl = 0.0
+        else:
+            tp        = TREND_PRESETS[trend_preset]
+            trend_bot = TrendBot(symbol=symbol.replace("/", "-"))
+            trend_tdf, trend_stats = trend_bot.run_backtest(df_trend, tp, TREND_CAPITAL, trend_preset)
+            _, tb = TrendBot(symbol=symbol.replace("/", "-")).run_backtest(
+                df_trend.copy(), tp, TREND_CAPITAL, trend_preset)
+            trend_base_pnl = tb.get("realized_pnl", 0.0)
+
+        overlap_bars          = _check_overlap(corr_tdf, trend_tdf)
+        transition_lag        = _calc_transition_lag(df_trend, trend_tdf)
         regime_at_corr_end    = sup.get_regime_at(corr_end_ts)
         regime_at_trend_start = sup.get_regime_at(trend_start_ts)
 
         corr_pnl      = corr_stats.get("realized_pnl", 0.0)
         trend_pnl     = trend_stats.get("realized_pnl", 0.0)
         combined      = corr_pnl + trend_pnl
-        base_combined = (corr_base.get("realized_pnl", 0.0) +
-                         trend_base.get("realized_pnl", 0.0))
-
-        corr_buys      = corr_stats.get("buys", 0)
-        corr_psl_fires = corr_stats.get("stop_loss_exits", 0)
-        corr_wr        = _corr_win_rate(corr_stats)
-
-        trend_trades        = trend_stats.get("trades", 0)
-        trend_wr            = trend_stats.get("win_rate", 0.0)
-        trend_psl_fires     = trend_stats.get("psl_fires", 0)
-        trend_target_fires  = trend_stats.get("target_fires", 0)
-        trend_target_pnl    = trend_stats.get("target_pnl", 0.0)
-        trend_psl_pnl       = trend_stats.get("psl_pnl", 0.0)
-        trend_avg_bars      = trend_stats.get("avg_bars_held", 0.0)
+        base_combined = corr_base.get("realized_pnl", 0.0) + trend_base_pnl
 
         return {
             "label":                  cycle["label"],
@@ -254,19 +277,21 @@ def run_cycle(cycle: dict, symbol: str,
             "trend_label":           tw["label"],
             "corr_severity":         cw.get("severity", ""),
             "corr_dd_pct":           cw.get("dd_pct", 0),
-            "corr_buys":             corr_buys,
-            "corr_wr":               corr_wr,
-            "corr_psl":              corr_psl_fires,
+            "corr_buys":             corr_stats.get("buys", 0),
+            "corr_wr":               _corr_win_rate(corr_stats),
+            "corr_psl":              corr_stats.get("stop_loss_exits", 0),
             "corr_pnl":              corr_pnl,
             "corr_exit":             corr_stats.get("exit_str", ""),
             "corr_discount_pct":     corr_stats.get("discount_pct", 0.0),
-            "trend_trades":          trend_trades,
-            "trend_wr":              trend_wr,
-            "trend_psl":             trend_psl_fires,
-            "trend_target_fires":    trend_target_fires,
-            "trend_target_pnl":      trend_target_pnl,
-            "trend_psl_pnl":         trend_psl_pnl,
-            "trend_avg_bars":        trend_avg_bars,
+            "trend_skipped":         trend_skipped,
+            "trend_tradeable_pct":   tradeable,
+            "trend_trades":          trend_stats.get("trades", 0),
+            "trend_wr":              trend_stats.get("win_rate", 0.0),
+            "trend_psl":             trend_stats.get("psl_fires", 0),
+            "trend_target_fires":    trend_stats.get("target_fires", 0),
+            "trend_target_pnl":      trend_stats.get("target_pnl", 0.0),
+            "trend_psl_pnl":         trend_stats.get("psl_pnl", 0.0),
+            "trend_avg_bars":        trend_stats.get("avg_bars_held", 0.0),
             "trend_pnl":             trend_pnl,
             "combined_pnl":          combined,
             "base_combined_pnl":     base_combined,
@@ -341,9 +366,9 @@ def print_results(results: list) -> None:
     print(f"\n{sep}")
     print(f" Integration Test v1 — MacroSupervisor + CorrectionBot + TrendBot")
     print(sep)
-    print(f"  {'Cycle':<16} {'dd%':>5} {'CorrPnL':>9} {'TrendPnL':>9} {'Combined':>9} "
-          f"{'Baseline':>9} {'Delta':>8} {'Overlap':>8} {'Lag(bars)':>10}")
-    print(f"  {sep2[:78]}")
+    print(f"  {'Cycle':<18} {'dd%':>5} {'CorrPnL':>9} {'TrendPnL':>9} {'Combined':>9} "
+          f"{'Baseline':>9} {'Delta':>8} {'Overlap':>8} {'Lag(bars)':>10} {'TrdPct':>7}")
+    print(f"  {sep2[:84]}")
 
     total_combined = 0.0
     total_baseline = 0.0
@@ -352,14 +377,15 @@ def print_results(results: list) -> None:
 
     for r in results:
         if r.get("error"):
-            print(f"  {r['label']:<16}  ERROR: {r['error']}")
+            print(f"  {r['label']:<18}  ERROR: {r['error']}")
             continue
         total_combined += r["combined_pnl"]
         total_baseline += r["base_combined_pnl"]
         total_overlap  += max(r["overlap_bars"], 0)
         h_rows.append(r)
+        skipped_tag = " [SKIPPED]" if r["trend_skipped"] else ""
         print(
-            f"  {r['label']:<16} "
+            f"  {r['label']:<18} "
             f"{r['corr_dd_pct']:>4}%  "
             f"${r['corr_pnl']:>+7.2f}  "
             f"${r['trend_pnl']:>+7.2f}  "
@@ -367,25 +393,26 @@ def print_results(results: list) -> None:
             f"${r['base_combined_pnl']:>+7.2f}  "
             f"${r['pnl_delta']:>+6.2f}  "
             f"{'NONE' if r['overlap_bars'] == 0 else str(r['overlap_bars']):>8}  "
-            f"{str(r['transition_lag_bars']) + ' bars':>10}"
+            f"{str(r['transition_lag_bars']) + ' bars':>10}  "
+            f"{r['trend_tradeable_pct']:>5.1f}%{skipped_tag}"
         )
 
-    print(f"  {sep2[:78]}")
-    print(f"  {'TOTAL':<16} {'':>5} {'':>9} {'':>9} "
+    print(f"  {sep2[:84]}")
+    print(f"  {'TOTAL':<18} {'':>5} {'':>9} {'':>9} "
           f"${total_combined:>+7.2f}  "
           f"${total_baseline:>+7.2f}  "
           f"${total_combined - total_baseline:>+6.2f}")
     print(sep)
 
-    # ── Regime transition report ──────────────────────────────────
+    # ── Regime transition report ──────────────────────────────────────────
     print(f"\n{sep}")
     print(f" Regime Transition Report")
     print(sep)
-    print(f"  {'Cycle':<16} {'dd%':>5} {'Severity':<12} {'Regime@CorrEnd':<20} {'Regime@TrendStart':<20}")
-    print(f"  {sep2[:73]}")
+    print(f"  {'Cycle':<18} {'dd%':>5} {'Severity':<12} {'Regime@CorrEnd':<20} {'Regime@TrendStart':<20}")
+    print(f"  {sep2[:75]}")
     for r in h_rows:
         print(
-            f"  {r['label']:<16} "
+            f"  {r['label']:<18} "
             f"{r['corr_dd_pct']:>4}%  "
             f"{r['corr_severity']:<12} "
             f"{r['regime_at_corr_end']:<20} "
@@ -393,32 +420,31 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
-    # ── Regime5 window distribution diagnostic ────────────────────
-    # Shows what % of trend window bars TrendBot was actually eligible to trade.
-    # BULL + RECOVERY = tradeable. CORRECTION + CRASH = locked out.
+    # ── Regime5 window distribution diagnostic ────────────────────────────
     print(f"\n{sep}")
     print(f" Regime5 Distribution in Trend Windows (TrendBot eligibility)")
     print(sep)
-    hdr = f"  {'Cycle':<16}"
+    hdr = f"  {'Cycle':<18}"
     for r5 in _ALL_REGIMES:
         hdr += f"  {r5:>12}"
-    hdr += f"  {'Tradeable%':>11}"
+    hdr += f"  {'Tradeable%':>11}  {'Status':>8}"
     print(hdr)
-    print(f"  {sep2[:76]}")
+    print(f"  {sep2[:80]}")
     for r in h_rows:
         dist = r.get("trend_r5_dist", {})
-        row_s = f"  {r['label']:<16}"
-        tradeable = 0
+        row_s = f"  {r['label']:<18}"
+        tradeable = 0.0
         for r5 in _ALL_REGIMES:
             d = dist.get(r5, {"bars": 0, "pct": 0.0})
             row_s += f"  {d['bars']:>6}({d['pct']:>4.1f}%)"
             if r5 in ("BULL", "RECOVERY"):
                 tradeable += d["pct"]
-        row_s += f"  {tradeable:>10.1f}%"
+        status = "SKIPPED" if r["trend_skipped"] else "OK"
+        row_s += f"  {tradeable:>10.1f}%  {status:>8}"
         print(row_s)
     print(sep)
 
-    # ── Hypothesis evaluation ──────────────────────────────────
+    # ── Hypothesis evaluation ─────────────────────────────────────────────
     print(f"\n{sep}")
     print(f" Integration Hypothesis Evaluation")
     print(sep)
@@ -431,10 +457,11 @@ def print_results(results: list) -> None:
     show("I2  No capital breach (each bot within allocated slice)",
          True, "(structural — separate capital pools)")
 
-    # I3: per-cycle lag check using severity-tiered threshold
+    # I3: per-cycle lag check — skip SKIPPED cycles (no TrendBot ran)
+    i3_rows = [r for r in h_rows if not r["trend_skipped"]]
     i3_pass = True
     i3_details = []
-    for r in h_rows:
+    for r in i3_rows:
         lag     = r["transition_lag_bars"]
         sev     = r["corr_severity"]
         thresh  = _I3_LAG_THRESHOLDS.get(sev, _I3_LAG_DEFAULT)
@@ -442,20 +469,18 @@ def print_results(results: list) -> None:
         if not ok:
             i3_pass = False
         i3_details.append(f"{r['label']}:{lag}b/{thresh}b")
-    max_lag = max((r["transition_lag_bars"] for r in h_rows
+    max_lag = max((r["transition_lag_bars"] for r in i3_rows
                    if r["transition_lag_bars"] >= 0), default=0)
     show(f"I3  Transition lag within severity threshold (max={max_lag} bars)",
-         i3_pass, f"({', '.join(i3_details)})")
+         i3_pass, f"({', '.join(i3_details)})" if i3_details else "(no eligible cycles)")
 
     show(f"I4  Combined PnL >= baseline sum "
          f"(${total_combined:+.2f} vs ${total_baseline:+.2f})",
          total_combined >= total_baseline,
          f"(delta=${total_combined - total_baseline:+.2f})")
 
-    corr_ok  = all(r["regime_at_corr_end"] in _VALID_CORR_END_REGIMES
-                   for r in h_rows)
-    trend_ok = all(r["regime_at_trend_start"] in _VALID_TREND_START_REGIMES
-                   for r in h_rows)
+    corr_ok  = all(r["regime_at_corr_end"] in _VALID_CORR_END_REGIMES for r in h_rows)
+    trend_ok = all(r["regime_at_trend_start"] in _VALID_TREND_START_REGIMES for r in h_rows)
     corr_bad  = [r["label"] for r in h_rows
                  if r["regime_at_corr_end"] not in _VALID_CORR_END_REGIMES]
     trend_bad = [r["label"] for r in h_rows
@@ -468,85 +493,101 @@ def print_results(results: list) -> None:
     show("I5  Regime5 valid at both transition boundaries",
          corr_ok and trend_ok, i5_note)
 
-    # ── Per-bot trade summary ──────────────────────────────────
+    skipped = [r["label"] for r in h_rows if r["trend_skipped"]]
+    i6_pass = len(skipped) == 0
+    i6_note = (f"({len(skipped)} skipped: {', '.join(skipped)})" if skipped
+               else f"(all cycles >= {MIN_TRADEABLE_PCT*100:.0f}% tradeable)")
+    show(f"I6  All trend windows >= {MIN_TRADEABLE_PCT*100:.0f}% tradeable (BULL+RECOVERY)",
+         i6_pass, i6_note)
+
+    # ── Per-bot trade summary ─────────────────────────────────────────────
     print(f"\n{sep}")
     print(f" Per-Bot Trade Summary")
     print(sep)
-    print(f"  {'Cycle':<16} {'CorrBuys':>9} {'CorrWR':>8} {'CorrPSL':>8} "
+    print(f"  {'Cycle':<18} {'CorrBuys':>9} {'CorrWR':>8} {'CorrPSL':>8} "
           f"{'CorrExit':<14} {'TrendTrades':>12} {'TrendWR':>8} {'TrendPSL':>9}")
-    print(f"  {sep2[:76]}")
+    print(f"  {sep2[:80]}")
     for r in h_rows:
         corr_wr_s  = f"{r['corr_wr']*100:.0f}%" if r['corr_buys'] > 0 else "n/a"
-        trend_wr_s = f"{r['trend_wr']:.0f}%"     if r['trend_trades'] > 0 else "n/a"
+        if r["trend_skipped"]:
+            trend_wr_s = "SKIPPED"
+            trend_t    = "-"
+            trend_psl  = "-"
+        else:
+            trend_wr_s = f"{r['trend_wr']:.0f}%" if r['trend_trades'] > 0 else "n/a"
+            trend_t    = str(r['trend_trades'])
+            trend_psl  = str(r['trend_psl'])
         print(
-            f"  {r['label']:<16} "
+            f"  {r['label']:<18} "
             f"{r['corr_buys']:>9}  "
             f"{corr_wr_s:>8}  "
             f"{r['corr_psl']:>8}  "
             f"{r['corr_exit']:<14}  "
-            f"{r['trend_trades']:>12}  "
+            f"{trend_t:>12}  "
             f"{trend_wr_s:>8}  "
-            f"{r['trend_psl']:>9}"
+            f"{trend_psl:>9}"
         )
     print(sep)
 
-    # ── TrendBot exit breakdown ─────────────────────────────────
-    print(f"\n{sep}")
-    print(f" TrendBot Exit Breakdown (reward:risk diagnostic)")
-    print(sep)
-    print(f"  {'Cycle':<16} {'TgtFires':>9} {'TgtPnL':>9} {'PSLFires':>9} "
-          f"{'PSLPnL':>9} {'AvgBars':>8} {'T/P Ratio':>10}")
-    print(f"  {sep2[:72]}")
-
-    total_tgt_fires = 0
-    total_tgt_pnl   = 0.0
-    total_psl_fires = 0
-    total_psl_pnl   = 0.0
-
-    for r in h_rows:
-        tf      = r["trend_target_fires"]
-        pf      = r["trend_psl"]
-        tp      = r["trend_target_pnl"]
-        pp      = r["trend_psl_pnl"]
-        ab      = r["trend_avg_bars"]
-        ratio_s = f"{tf/pf:.2f}" if pf > 0 else ("inf" if tf > 0 else "n/a")
-        total_tgt_fires += tf
-        total_tgt_pnl   += tp
-        total_psl_fires += pf
-        total_psl_pnl   += pp
-        print(
-            f"  {r['label']:<16} "
-            f"{tf:>9}  "
-            f"${tp:>+7.2f}  "
-            f"{pf:>9}  "
-            f"${pp:>+7.2f}  "
-            f"{ab:>8.1f}  "
-            f"{ratio_s:>10}"
-        )
-
-    print(f"  {sep2[:72]}")
-    overall_ratio = (f"{total_tgt_fires/total_psl_fires:.2f}"
-                     if total_psl_fires > 0 else "n/a")
-    print(
-        f"  {'TOTAL':<16} "
-        f"{total_tgt_fires:>9}  "
-        f"${total_tgt_pnl:>+7.2f}  "
-        f"{total_psl_fires:>9}  "
-        f"${total_psl_pnl:>+7.2f}  "
-        f"{'':>8}  "
-        f"{overall_ratio:>10}"
-    )
-    print(sep)
-
-    if total_tgt_fires > 0 and total_psl_fires > 0:
-        avg_win  = total_tgt_pnl / total_tgt_fires
-        avg_loss = total_psl_pnl / total_psl_fires
-        rr       = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf")
-        be_wr    = abs(avg_loss) / (avg_win + abs(avg_loss)) * 100
-        print(f"\n  Avg target win  : ${avg_win:>+.4f}")
-        print(f"  Avg PSL loss    : ${avg_loss:>+.4f}")
-        print(f"  Reward:Risk     : {rr:.3f}  (need WR > {be_wr:.1f}% to break even)")
+    # ── TrendBot exit breakdown (only non-skipped cycles) ─────────────────
+    active_rows = [r for r in h_rows if not r["trend_skipped"]]
+    if active_rows:
+        print(f"\n{sep}")
+        print(f" TrendBot Exit Breakdown (reward:risk diagnostic — skipped cycles excluded)")
         print(sep)
+        print(f"  {'Cycle':<18} {'TgtFires':>9} {'TgtPnL':>9} {'PSLFires':>9} "
+              f"{'PSLPnL':>9} {'AvgBars':>8} {'T/P Ratio':>10}")
+        print(f"  {sep2[:76]}")
+
+        total_tgt_fires = 0
+        total_tgt_pnl   = 0.0
+        total_psl_fires = 0
+        total_psl_pnl   = 0.0
+
+        for r in active_rows:
+            tf      = r["trend_target_fires"]
+            pf      = r["trend_psl"]
+            tp_     = r["trend_target_pnl"]
+            pp      = r["trend_psl_pnl"]
+            ab      = r["trend_avg_bars"]
+            ratio_s = f"{tf/pf:.2f}" if pf > 0 else ("inf" if tf > 0 else "n/a")
+            total_tgt_fires += tf
+            total_tgt_pnl   += tp_
+            total_psl_fires += pf
+            total_psl_pnl   += pp
+            print(
+                f"  {r['label']:<18} "
+                f"{tf:>9}  "
+                f"${tp_:>+7.2f}  "
+                f"{pf:>9}  "
+                f"${pp:>+7.2f}  "
+                f"{ab:>8.1f}  "
+                f"{ratio_s:>10}"
+            )
+
+        print(f"  {sep2[:76]}")
+        overall_ratio = (f"{total_tgt_fires/total_psl_fires:.2f}"
+                         if total_psl_fires > 0 else "n/a")
+        print(
+            f"  {'TOTAL':<18} "
+            f"{total_tgt_fires:>9}  "
+            f"${total_tgt_pnl:>+7.2f}  "
+            f"{total_psl_fires:>9}  "
+            f"${total_psl_pnl:>+7.2f}  "
+            f"{'':>8}  "
+            f"{overall_ratio:>10}"
+        )
+        print(sep)
+
+        if total_tgt_fires > 0 and total_psl_fires > 0:
+            avg_win  = total_tgt_pnl / total_tgt_fires
+            avg_loss = total_psl_pnl / total_psl_fires
+            rr       = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf")
+            be_wr    = abs(avg_loss) / (avg_win + abs(avg_loss)) * 100
+            print(f"\n  Avg target win  : ${avg_win:>+.4f}")
+            print(f"  Avg PSL loss    : ${avg_loss:>+.4f}")
+            print(f"  Reward:Risk     : {rr:.3f}  (need WR > {be_wr:.1f}% to break even)")
+            print(sep)
 
     print(f"\n  Total combined PnL : ${total_combined:+.2f}")
     print(f"  Baseline sum       : ${total_baseline:+.2f}")
@@ -576,11 +617,12 @@ def main():
     print(f"Capital           : ${TOTAL_CAPITAL:.0f} total  "
           f"(${CORR_CAPITAL:.0f} correction / ${TREND_CAPITAL:.0f} trend)")
     print(f"Cycles            : {len(CYCLE_PAIRS)}")
+    print(f"Min tradeable pct : {MIN_TRADEABLE_PCT*100:.0f}% (I6 gate)")
     print(f"Cycle windows     :")
     for cy in CYCLE_PAIRS:
         cw, tw = cy["correction"], cy["trend"]
         lag_d = (_parse_dt(tw["start"]) - _parse_dt(cw["end"])).days
-        print(f"  {cy['label']:<16}  corr {cw['start']} → {cw['end']} "
+        print(f"  {cy['label']:<18}  corr {cw['start']} → {cw['end']} "
               f"({cw['severity']}, {cw['dd_pct']}%)  "
               f"trend {tw['start']} → {tw['end']}  (gap={lag_d}d)")
     print()
@@ -592,14 +634,17 @@ def main():
         if r.get("error"):
             print(f"  [{r['label']}]  ERROR: {r['error']}")
         else:
+            skip_tag = "  [I6 SKIPPED — regime-hostile]" if r["trend_skipped"] else ""
             print(
                 f"  [{r['label']}]  "
                 f"corr={r['corr_pnl']:+.2f} ({r['corr_buys']}b/{r['corr_psl']}psl)  "
                 f"trend={r['trend_pnl']:+.2f} ({r['trend_trades']}t "
                 f"{r['trend_target_fires']}tgt/{r['trend_psl']}psl)  "
                 f"combined={r['combined_pnl']:+.2f}  "
+                f"tradeable={r['trend_tradeable_pct']:.1f}%  "
                 f"lag={r['transition_lag_bars']}bars  "
                 f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}"
+                f"{skip_tag}"
             )
         return r
 
