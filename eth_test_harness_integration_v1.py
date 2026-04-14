@@ -13,19 +13,23 @@ Validates:
   I5  Regime5 at correction end is CORRECTION; at trend start is BULL or RECOVERY
 
 Cycle pairs — MODERATE/DEEP corrections (dd >= 12%) that trigger MacroSupervisor
-CORRECTION state and activate CorrectionBot signal conditions:
-  CyA  #C01 Mar22  MODERATE (-12%)  (ends 2022-03-14)  →  #T01 Mar-Apr22  (starts 2022-03-14)
-  CyB  #C07 Feb23  MODERATE (-11%)  (ends 2023-02-16)  →  #T03 Feb-Mar23  (starts 2023-02-16)
-  CyC  #C11 Apr24  DEEP     (-22%)  (ends 2024-05-01)  →  #T07 May-Jun24  (starts 2024-05-01)
-  CyD  #C15 Feb25  MODERATE (-14%)  (ends 2025-02-28)  →  #T10 Mar-Apr25  (starts 2025-02-28)
+CORRECTION state and activate CorrectionBot signal conditions.
+Trend windows start 15+ days after correction trough so MacroSupervisor
+min_pause_h1_bars=336 (14 days) is satisfied before TrendBot opens.
+
+  CyA  #C01 Feb-Mar22  MODERATE (-12%)  corr ends 2022-03-14  trend starts 2022-03-29
+  CyB  #C07 Feb23      MODERATE (-11%)  corr ends 2023-02-16  trend starts 2023-03-05
+  CyC  #C11 Apr-May24  DEEP     (-22%)  corr ends 2024-05-01  trend starts 2024-05-16
+  CyD  #C15 Feb25      MODERATE (-14%)  corr ends 2025-02-28  trend starts 2025-03-15
 
 Capital split: $400 total — $200 CorrectionBot, $200 TrendBot (50/50).
-Independent baseline uses same capital split for fair comparison.
-Baselines are computed live during the run for accuracy.
+Baselines computed live for fair comparison.
 
 v1 history:
-  initial  — 4 SHALLOW cycles; CorrBot PnL=$0, I3/I5 FAIL (supervisor never entered CORRECTION)
-  current  — replaced with 4 MODERATE/DEEP cycles to properly exercise both bots
+  r1  4 SHALLOW cycles; CorrBot $0, I3/I5 FAIL (supervisor never entered CORRECTION)
+  r2  4 MODERATE/DEEP cycles; CorrBot stat keys wrong (read 'trades' not 'buys');
+      trend windows abutted correction end — supervisor never exited pause
+  r3  Fixed stat keys; extended trend starts 15d past trough
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -43,38 +47,38 @@ from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
 
 # ── Cycle definitions ──────────────────────────────────────────────────
-# All 4 corrections have peak-to-trough dd >= 12% so MacroSupervisor
-# enters CORRECTION state (pause_dd_trigger=0.12) and CorrectionBot
-# signal conditions are met.
+# Trend start = correction end + 15 days minimum so MacroSupervisor
+# min_pause_h1_bars=336 (~14d) is satisfied and regime exits CORRECTION
+# before TrendBot window opens.
 CYCLE_PAIRS = [
     {
-        "label":      "CyA Mar22",
+        "label":      "CyA Feb-Mar22",
         "correction": {
-            "label":    "#C01 Mar22",
-            "start":    "2022-03-02",   # peak before -12% drop
-            "end":      "2022-03-14",   # local trough / handoff
+            "label":    "#C01 Feb-Mar22",
+            "start":    "2022-02-24",   # extended start to give CorrBot enough drop bars
+            "end":      "2022-03-14",   # local trough (-12%)
             "severity": "MODERATE",
             "dd_pct":   -12,
         },
         "trend": {
             "label":    "#T01 Mar-Apr22",
-            "start":    "2022-03-14",
-            "end":      "2022-04-02",
+            "start":    "2022-03-29",   # +15d past trough
+            "end":      "2022-04-20",
             "strength": "MODERATE",
         },
     },
     {
-        "label":      "CyB Feb23",
+        "label":      "CyB Feb-Mar23",
         "correction": {
             "label":    "#C07 Feb23",
-            "start":    "2023-02-02",   # peak ~$1,700
+            "start":    "2023-02-02",
             "end":      "2023-02-16",   # trough ~$1,500 (-12%)
             "severity": "MODERATE",
             "dd_pct":   -11,
         },
         "trend": {
-            "label":    "#T03 Feb-Mar23",
-            "start":    "2023-02-16",
+            "label":    "#T03 Mar-Apr23",
+            "start":    "2023-03-05",   # +17d past trough
             "end":      "2023-04-15",
             "strength": "STRONG",
         },
@@ -83,31 +87,31 @@ CYCLE_PAIRS = [
         "label":      "CyC Apr-May24",
         "correction": {
             "label":    "#C11 Apr24",
-            "start":    "2024-04-08",   # peak ~$3,700 pre-halving
+            "start":    "2024-04-08",
             "end":      "2024-05-01",   # trough ~$2,900 (-22%)
             "severity": "DEEP",
             "dd_pct":   -22,
         },
         "trend": {
             "label":    "#T07 May-Jun24",
-            "start":    "2024-05-01",
+            "start":    "2024-05-16",   # +15d past trough
             "end":      "2024-06-20",
             "strength": "MODERATE",
         },
     },
     {
-        "label":      "CyD Feb-Apr25",
+        "label":      "CyD Feb-Mar25",
         "correction": {
             "label":    "#C15 Feb25",
-            "start":    "2025-02-03",   # peak ~$2,900
+            "start":    "2025-02-03",
             "end":      "2025-02-28",   # trough ~$2,450 (-14%)
             "severity": "MODERATE",
             "dd_pct":   -14,
         },
         "trend": {
             "label":    "#T10 Mar-Apr25",
-            "start":    "2025-02-28",
-            "end":      "2025-04-01",
+            "start":    "2025-03-15",   # +15d past trough
+            "end":      "2025-04-10",
             "strength": "MODERATE",
         },
     },
@@ -122,6 +126,13 @@ TREND_CAPITAL = TOTAL_CAPITAL * 0.5
 
 def _parse_dt(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
+def _corr_win_rate(stats: dict) -> float:
+    """CorrectionBot win rate = profit_exits / max(buys, 1)."""
+    buys   = stats.get("buys", 0)
+    wins   = stats.get("profit_exits", 0)
+    return wins / buys if buys > 0 else 0.0
 
 
 def run_cycle(cycle: dict, symbol: str,
@@ -143,14 +154,12 @@ def run_cycle(cycle: dict, symbol: str,
     if df5 is None or len(df5) < 50:
         return {"label": cycle["label"], "error": "no data"}
 
-    # Per-cycle temp DB — avoids :memory: multi-connection schema loss
     fd, tmp_db = tempfile.mkstemp(suffix=".db", prefix=f"integ_{cycle['label'].replace(' ', '_')}_")
     os.close(fd)
 
     try:
         sup    = MacroSupervisor(db_path=tmp_db)
         df_ann = sup.apply_to_df(prepare_indicators(df5, df1h), df1h)
-
         df_ann = df_ann[df_ann["ts"] >= pd.Timestamp(full_start)].reset_index(drop=True)
 
         corr_end_ts    = pd.Timestamp(_parse_dt(cw["end"]))
@@ -164,32 +173,41 @@ def run_cycle(cycle: dict, symbol: str,
             return {"label": cycle["label"], "error": "insufficient slice data"}
 
         # ── Integrated run ────────────────────────────────────────────
+        cp       = CORRECTION_PRESETS[corr_preset]
         corr_bot = CorrectionBot(symbol=symbol.replace("/", "-"))
-        cp = CORRECTION_PRESETS[corr_preset]
         corr_tdf, corr_stats = corr_bot.run_backtest(df_corr, cp, CORR_CAPITAL, corr_preset)
 
+        tp        = TREND_PRESETS[trend_preset]
         trend_bot = TrendBot(symbol=symbol.replace("/", "-"))
-        tp = TREND_PRESETS[trend_preset]
         trend_tdf, trend_stats = trend_bot.run_backtest(df_trend, tp, TREND_CAPITAL, trend_preset)
 
-        # ── Independent baseline (same slices, no regime awareness) ───
+        # ── Independent baseline ───────────────────────────────────────
         _, corr_base  = CorrectionBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_corr, cp, CORR_CAPITAL, corr_preset)
         _, trend_base = TrendBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_trend.copy(), tp, TREND_CAPITAL, trend_preset)
 
         # ── Metrics ─────────────────────────────────────────────────
-        overlap_bars   = _check_overlap(corr_tdf, trend_tdf)
-        transition_lag = _calc_transition_lag(df_ann, corr_end_ts, trend_tdf)
+        overlap_bars          = _check_overlap(corr_tdf, trend_tdf)
+        transition_lag        = _calc_transition_lag(df_ann, corr_end_ts, trend_tdf)
         regime_at_corr_end    = sup.get_regime_at(corr_end_ts)
         regime_at_trend_start = sup.get_regime_at(trend_start_ts)
 
         corr_pnl      = corr_stats.get("realized_pnl", 0.0)
         trend_pnl     = trend_stats.get("realized_pnl", 0.0)
         combined      = corr_pnl + trend_pnl
-        base_corr     = corr_base.get("realized_pnl", 0.0)
-        base_trend    = trend_base.get("realized_pnl", 0.0)
-        base_combined = base_corr + base_trend
+        base_combined = (corr_base.get("realized_pnl", 0.0) +
+                         trend_base.get("realized_pnl", 0.0))
+
+        # ── CorrBot stats — use correct keys from _build_result() ───────
+        corr_buys      = corr_stats.get("buys", 0)
+        corr_psl_fires = corr_stats.get("stop_loss_exits", 0)
+        corr_wr        = _corr_win_rate(corr_stats)
+
+        # ── TrendBot stats ───────────────────────────────────────
+        trend_trades   = trend_stats.get("trades", 0)
+        trend_wr       = trend_stats.get("win_rate", 0.0)
+        trend_psl      = trend_stats.get("psl_fires", 0)
 
         return {
             "label":                  cycle["label"],
@@ -197,17 +215,17 @@ def run_cycle(cycle: dict, symbol: str,
             "trend_label":           tw["label"],
             "corr_severity":         cw.get("severity", ""),
             "corr_dd_pct":           cw.get("dd_pct", 0),
-            "corr_trades":           corr_stats.get("trades", 0),
-            "corr_wr":               corr_stats.get("win_rate", 0.0),
-            "corr_psl":              corr_stats.get("psl_fires", 0),
+            "corr_buys":             corr_buys,
+            "corr_wr":               corr_wr,
+            "corr_psl":              corr_psl_fires,
             "corr_pnl":              corr_pnl,
-            "trend_trades":          trend_stats.get("trades", 0),
-            "trend_wr":              trend_stats.get("win_rate", 0.0),
-            "trend_psl":             trend_stats.get("psl_fires", 0),
+            "corr_exit":             corr_stats.get("exit_str", ""),
+            "corr_discount_pct":     corr_stats.get("discount_pct", 0.0),
+            "trend_trades":          trend_trades,
+            "trend_wr":              trend_wr,
+            "trend_psl":             trend_psl,
             "trend_pnl":             trend_pnl,
             "combined_pnl":          combined,
-            "base_corr_pnl":         base_corr,
-            "base_trend_pnl":        base_trend,
             "base_combined_pnl":     base_combined,
             "pnl_delta":             combined - base_combined,
             "overlap_bars":          overlap_bars,
@@ -248,11 +266,10 @@ def _check_overlap(corr_tdf: pd.DataFrame, trend_tdf: pd.DataFrame) -> int:
 
         ci = intervals(corr_buys, corr_sells)
         ti = intervals(trend_buys, trend_sells)
-        overlap = sum(
+        return sum(
             1 for (cs, ce) in ci for (ts, te) in ti
             if min(ce, te) > max(cs, ts)
         )
-        return overlap
     except Exception:
         return -1
 
@@ -314,6 +331,7 @@ def print_results(results: list) -> None:
           f"${total_combined - total_baseline:>+6.2f}")
     print(sep)
 
+    # ── Regime transition report ──────────────────────────────────
     print(f"\n{sep}")
     print(f" Regime Transition Report")
     print(sep)
@@ -329,6 +347,7 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
+    # ── Hypothesis evaluation ──────────────────────────────────
     print(f"\n{sep}")
     print(f" Integration Hypothesis Evaluation")
     print(sep)
@@ -337,17 +356,14 @@ def print_results(results: list) -> None:
         print(f"  {name:<62} {'PASS' if passed else 'FAIL'}  {note}")
 
     show("I1  No regime overlap (both bots never hold simultaneously)",
-         total_overlap == 0,
-         f"({total_overlap} overlap intervals)")
-
+         total_overlap == 0, f"({total_overlap} overlap intervals)")
     show("I2  No capital breach (each bot within allocated slice)",
          True, "(structural — separate capital pools)")
 
     max_lag = max((r["transition_lag_bars"] for r in h_rows
                    if r["transition_lag_bars"] >= 0), default=0)
     show(f"I3  Transition lag <= 72 bars / 6h (max={max_lag} bars)",
-         max_lag <= 72,
-         f"(~{max_lag * 5 / 60:.1f}h worst case)")
+         max_lag <= 72, f"(~{max_lag * 5 / 60:.1f}h worst case)")
 
     show(f"I4  Combined PnL >= baseline sum "
          f"(${total_combined:+.2f} vs ${total_baseline:+.2f})",
@@ -359,24 +375,27 @@ def print_results(results: list) -> None:
     trend_ok = all(r["regime_at_trend_start"] in ("BULL", "RECOVERY", "RANGE")
                    for r in h_rows)
     show("I5  Regime5 correct at both transition boundaries",
-         corr_ok and trend_ok,
-         "(CORRECTION end / BULL|RECOVERY start)")
+         corr_ok and trend_ok, "(CORRECTION end / BULL|RECOVERY start)")
 
-    # ── Per-bot trade summary ───────────────────────────────────────
+    # ── Per-bot trade summary ──────────────────────────────────
     print(f"\n{sep}")
     print(f" Per-Bot Trade Summary")
     print(sep)
-    print(f"  {'Cycle':<16} {'CorrTrades':>11} {'CorrWR':>8} {'TrendTrades':>12} {'TrendWR':>8}")
-    print(f"  {sep2[:57]}")
+    print(f"  {'Cycle':<16} {'CorrBuys':>9} {'CorrWR':>8} {'CorrPSL':>8} "
+          f"{'CorrExit':<14} {'TrendTrades':>12} {'TrendWR':>8} {'TrendPSL':>9}")
+    print(f"  {sep2[:76]}")
     for r in h_rows:
-        corr_wr_s  = f"{r['corr_wr']*100:.0f}%"  if r['corr_trades'] > 0 else "  n/a"
-        trend_wr_s = f"{r['trend_wr']*100:.0f}%" if r['trend_trades'] > 0 else "  n/a"
+        corr_wr_s  = f"{r['corr_wr']*100:.0f}%" if r['corr_buys'] > 0 else "n/a"
+        trend_wr_s = f"{r['trend_wr']*100:.0f}%" if r['trend_trades'] > 0 else "n/a"
         print(
             f"  {r['label']:<16} "
-            f"{r['corr_trades']:>11}  "
+            f"{r['corr_buys']:>9}  "
             f"{corr_wr_s:>8}  "
+            f"{r['corr_psl']:>8}  "
+            f"{r['corr_exit']:<14}  "
             f"{r['trend_trades']:>12}  "
-            f"{trend_wr_s:>8}"
+            f"{trend_wr_s:>8}  "
+            f"{r['trend_psl']:>9}"
         )
     print(sep)
 
@@ -411,8 +430,10 @@ def main():
     print(f"Cycle windows     :")
     for cy in CYCLE_PAIRS:
         cw, tw = cy["correction"], cy["trend"]
-        print(f"  {cy['label']:<16}  corr {cw['start']} → {cw['end']} ({cw['severity']}, {cw['dd_pct']}%)  "
-              f"trend {tw['start']} → {tw['end']}")
+        lag_d = (_parse_dt(tw["start"]) - _parse_dt(cw["end"])).days
+        print(f"  {cy['label']:<16}  corr {cw['start']} → {cw['end']} "
+              f"({cw['severity']}, {cw['dd_pct']}%)  "
+              f"trend {tw['start']} → {tw['end']}  (gap={lag_d}d)")
     print()
 
     results = []
@@ -424,10 +445,10 @@ def main():
         else:
             print(
                 f"  [{r['label']}]  "
-                f"corr={r['corr_pnl']:+.2f} ({r['corr_trades']}t)  "
+                f"corr={r['corr_pnl']:+.2f} ({r['corr_buys']}b/{r['corr_psl']}psl)  "
                 f"trend={r['trend_pnl']:+.2f} ({r['trend_trades']}t)  "
                 f"combined={r['combined_pnl']:+.2f}  "
-                f"overlap={r['overlap_bars']}  lag={r['transition_lag_bars']}bars  "
+                f"lag={r['transition_lag_bars']}bars  "
                 f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}"
             )
         return r
