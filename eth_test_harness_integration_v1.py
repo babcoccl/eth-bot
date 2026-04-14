@@ -30,6 +30,7 @@ v1 history:
   r2  4 MODERATE/DEEP cycles; CorrBot stat keys wrong (read 'trades' not 'buys');
       trend windows abutted correction end — supervisor never exited pause
   r3  Fixed stat keys; extended trend starts 15d past trough
+  r4  Added TrendBot exit breakdown (target_fires/psl_fires/avg_bars) to summary
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -47,16 +48,13 @@ from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
 
 # ── Cycle definitions ──────────────────────────────────────────────────
-# Trend start = correction end + 15 days minimum so MacroSupervisor
-# min_pause_h1_bars=336 (~14d) is satisfied and regime exits CORRECTION
-# before TrendBot window opens.
 CYCLE_PAIRS = [
     {
         "label":      "CyA Feb-Mar22",
         "correction": {
             "label":    "#C01 Feb-Mar22",
-            "start":    "2022-02-24",   # extended start to give CorrBot enough drop bars
-            "end":      "2022-03-14",   # local trough (-12%)
+            "start":    "2022-02-24",
+            "end":      "2022-03-14",
             "severity": "MODERATE",
             "dd_pct":   -12,
         },
@@ -72,7 +70,7 @@ CYCLE_PAIRS = [
         "correction": {
             "label":    "#C07 Feb23",
             "start":    "2023-02-02",
-            "end":      "2023-02-16",   # trough ~$1,500 (-12%)
+            "end":      "2023-02-16",
             "severity": "MODERATE",
             "dd_pct":   -11,
         },
@@ -88,7 +86,7 @@ CYCLE_PAIRS = [
         "correction": {
             "label":    "#C11 Apr24",
             "start":    "2024-04-08",
-            "end":      "2024-05-01",   # trough ~$2,900 (-22%)
+            "end":      "2024-05-01",
             "severity": "DEEP",
             "dd_pct":   -22,
         },
@@ -104,7 +102,7 @@ CYCLE_PAIRS = [
         "correction": {
             "label":    "#C15 Feb25",
             "start":    "2025-02-03",
-            "end":      "2025-02-28",   # trough ~$2,450 (-14%)
+            "end":      "2025-02-28",
             "severity": "MODERATE",
             "dd_pct":   -14,
         },
@@ -129,18 +127,13 @@ def _parse_dt(s: str) -> datetime:
 
 
 def _corr_win_rate(stats: dict) -> float:
-    """CorrectionBot win rate = profit_exits / max(buys, 1)."""
-    buys   = stats.get("buys", 0)
-    wins   = stats.get("profit_exits", 0)
+    buys = stats.get("buys", 0)
+    wins = stats.get("profit_exits", 0)
     return wins / buys if buys > 0 else 0.0
 
 
 def run_cycle(cycle: dict, symbol: str,
              corr_preset: str, trend_preset: str) -> dict:
-    """
-    Run one full correction→trend cycle with MacroSupervisor gating.
-    Uses a per-cycle temp SQLite file so each thread gets its own schema.
-    """
     cw = cycle["correction"]
     tw = cycle["trend"]
 
@@ -172,7 +165,6 @@ def run_cycle(cycle: dict, symbol: str,
         if len(df_corr) < 10 or len(df_trend) < 10:
             return {"label": cycle["label"], "error": "insufficient slice data"}
 
-        # ── Integrated run ────────────────────────────────────────────
         cp       = CORRECTION_PRESETS[corr_preset]
         corr_bot = CorrectionBot(symbol=symbol.replace("/", "-"))
         corr_tdf, corr_stats = corr_bot.run_backtest(df_corr, cp, CORR_CAPITAL, corr_preset)
@@ -181,13 +173,11 @@ def run_cycle(cycle: dict, symbol: str,
         trend_bot = TrendBot(symbol=symbol.replace("/", "-"))
         trend_tdf, trend_stats = trend_bot.run_backtest(df_trend, tp, TREND_CAPITAL, trend_preset)
 
-        # ── Independent baseline ───────────────────────────────────────
         _, corr_base  = CorrectionBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_corr, cp, CORR_CAPITAL, corr_preset)
         _, trend_base = TrendBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_trend.copy(), tp, TREND_CAPITAL, trend_preset)
 
-        # ── Metrics ─────────────────────────────────────────────────
         overlap_bars          = _check_overlap(corr_tdf, trend_tdf)
         transition_lag        = _calc_transition_lag(df_ann, corr_end_ts, trend_tdf)
         regime_at_corr_end    = sup.get_regime_at(corr_end_ts)
@@ -199,15 +189,17 @@ def run_cycle(cycle: dict, symbol: str,
         base_combined = (corr_base.get("realized_pnl", 0.0) +
                          trend_base.get("realized_pnl", 0.0))
 
-        # ── CorrBot stats — use correct keys from _build_result() ───────
         corr_buys      = corr_stats.get("buys", 0)
         corr_psl_fires = corr_stats.get("stop_loss_exits", 0)
         corr_wr        = _corr_win_rate(corr_stats)
 
-        # ── TrendBot stats ───────────────────────────────────────
-        trend_trades   = trend_stats.get("trades", 0)
-        trend_wr       = trend_stats.get("win_rate", 0.0)
-        trend_psl      = trend_stats.get("psl_fires", 0)
+        trend_trades        = trend_stats.get("trades", 0)
+        trend_wr            = trend_stats.get("win_rate", 0.0)
+        trend_psl_fires     = trend_stats.get("psl_fires", 0)
+        trend_target_fires  = trend_stats.get("target_fires", 0)
+        trend_target_pnl    = trend_stats.get("target_pnl", 0.0)
+        trend_psl_pnl       = trend_stats.get("psl_pnl", 0.0)
+        trend_avg_bars      = trend_stats.get("avg_bars_held", 0.0)
 
         return {
             "label":                  cycle["label"],
@@ -223,7 +215,11 @@ def run_cycle(cycle: dict, symbol: str,
             "corr_discount_pct":     corr_stats.get("discount_pct", 0.0),
             "trend_trades":          trend_trades,
             "trend_wr":              trend_wr,
-            "trend_psl":             trend_psl,
+            "trend_psl":             trend_psl_fires,
+            "trend_target_fires":    trend_target_fires,
+            "trend_target_pnl":      trend_target_pnl,
+            "trend_psl_pnl":         trend_psl_pnl,
+            "trend_avg_bars":        trend_avg_bars,
             "trend_pnl":             trend_pnl,
             "combined_pnl":          combined,
             "base_combined_pnl":     base_combined,
@@ -243,7 +239,6 @@ def run_cycle(cycle: dict, symbol: str,
 
 
 def _check_overlap(corr_tdf: pd.DataFrame, trend_tdf: pd.DataFrame) -> int:
-    """Count overlapping open-position intervals between the two bots."""
     if corr_tdf is None or corr_tdf.empty:
         return 0
     if trend_tdf is None or trend_tdf.empty:
@@ -276,7 +271,6 @@ def _check_overlap(corr_tdf: pd.DataFrame, trend_tdf: pd.DataFrame) -> int:
 
 def _calc_transition_lag(df_ann: pd.DataFrame,
                          corr_end_ts, trend_tdf: pd.DataFrame) -> int:
-    """5m bars from correction end to first TrendBot BUY."""
     if trend_tdf is None or trend_tdf.empty:
         return -1
     buys = trend_tdf[trend_tdf["side"] == "BUY"]
@@ -386,7 +380,7 @@ def print_results(results: list) -> None:
     print(f"  {sep2[:76]}")
     for r in h_rows:
         corr_wr_s  = f"{r['corr_wr']*100:.0f}%" if r['corr_buys'] > 0 else "n/a"
-        trend_wr_s = f"{r['trend_wr']*100:.0f}%" if r['trend_trades'] > 0 else "n/a"
+        trend_wr_s = f"{r['trend_wr']:.0f}%"     if r['trend_trades'] > 0 else "n/a"
         print(
             f"  {r['label']:<16} "
             f"{r['corr_buys']:>9}  "
@@ -398,6 +392,68 @@ def print_results(results: list) -> None:
             f"{r['trend_psl']:>9}"
         )
     print(sep)
+
+    # ── TrendBot exit breakdown ─────────────────────────────────
+    # Reveals reward:risk ratio empirically — use to calibrate preset
+    # without overfitting. Key metric: TargetPnL + PSLPnL should be > 0
+    # and PSL avg loss should be < Target avg win.
+    print(f"\n{sep}")
+    print(f" TrendBot Exit Breakdown (reward:risk diagnostic)")
+    print(sep)
+    print(f"  {'Cycle':<16} {'TgtFires':>9} {'TgtPnL':>9} {'PSLFires':>9} "
+          f"{'PSLPnL':>9} {'AvgBars':>8} {'T/P Ratio':>10}")
+    print(f"  {sep2[:72]}")
+
+    total_tgt_fires = 0
+    total_tgt_pnl   = 0.0
+    total_psl_fires = 0
+    total_psl_pnl   = 0.0
+
+    for r in h_rows:
+        tf  = r["trend_target_fires"]
+        pf  = r["trend_psl"]
+        tp  = r["trend_target_pnl"]
+        pp  = r["trend_psl_pnl"]
+        ab  = r["trend_avg_bars"]
+        ratio_s = f"{tf/pf:.2f}" if pf > 0 else ("inf" if tf > 0 else "n/a")
+        total_tgt_fires += tf
+        total_tgt_pnl   += tp
+        total_psl_fires += pf
+        total_psl_pnl   += pp
+        print(
+            f"  {r['label']:<16} "
+            f"{tf:>9}  "
+            f"${tp:>+7.2f}  "
+            f"{pf:>9}  "
+            f"${pp:>+7.2f}  "
+            f"{ab:>8.1f}  "
+            f"{ratio_s:>10}"
+        )
+
+    print(f"  {sep2[:72]}")
+    overall_ratio = (f"{total_tgt_fires/total_psl_fires:.2f}"
+                     if total_psl_fires > 0 else "n/a")
+    print(
+        f"  {'TOTAL':<16} "
+        f"{total_tgt_fires:>9}  "
+        f"${total_tgt_pnl:>+7.2f}  "
+        f"{total_psl_fires:>9}  "
+        f"${total_psl_pnl:>+7.2f}  "
+        f"{'':>8}  "
+        f"{overall_ratio:>10}"
+    )
+    print(sep)
+
+    # avg win vs avg loss diagnostic
+    if total_tgt_fires > 0 and total_psl_fires > 0:
+        avg_win  = total_tgt_pnl / total_tgt_fires
+        avg_loss = total_psl_pnl / total_psl_fires   # negative
+        rr       = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf")
+        be_wr    = abs(avg_loss) / (avg_win + abs(avg_loss)) * 100
+        print(f"\n  Avg target win  : ${avg_win:>+.4f}")
+        print(f"  Avg PSL loss    : ${avg_loss:>+.4f}")
+        print(f"  Reward:Risk     : {rr:.3f}  (need WR > {be_wr:.1f}% to break even)")
+        print(sep)
 
     print(f"\n  Total combined PnL : ${total_combined:+.2f}")
     print(f"  Baseline sum       : ${total_baseline:+.2f}")
@@ -446,7 +502,8 @@ def main():
             print(
                 f"  [{r['label']}]  "
                 f"corr={r['corr_pnl']:+.2f} ({r['corr_buys']}b/{r['corr_psl']}psl)  "
-                f"trend={r['trend_pnl']:+.2f} ({r['trend_trades']}t)  "
+                f"trend={r['trend_pnl']:+.2f} ({r['trend_trades']}t "
+                f"{r['trend_target_fires']}tgt/{r['trend_psl']}psl)  "
                 f"combined={r['combined_pnl']:+.2f}  "
                 f"lag={r['transition_lag_bars']}bars  "
                 f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}"
