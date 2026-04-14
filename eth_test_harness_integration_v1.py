@@ -16,7 +16,7 @@ Validates:
   I4  Combined PnL >= sum of independent window results (handoff adds no friction)
   I5  Regime5 states at both boundaries are valid (not RANGE at corr_end;
       any non-RANGE state acceptable at trend_start since TrendBot gates per-bar)
-  I6  Trend window Tradeable% >= MIN_TRADEABLE_PCT (25%) before TrendBot runs
+  I6  Trend window Tradeable% >= MIN_TRADEABLE_PCT (25%) before TrendBot runs.
       Cycles below the threshold are logged as SKIPPED — not an error, but a
       signal that the harness cycle definition needs a better trend window.
       Derived from CyC/CyD at 22-24% tradeable being near breakeven; below 25%
@@ -35,17 +35,33 @@ Note on I6: SKIPPED cycles still run CorrectionBot and report corr_pnl. Only
 TrendBot is skipped — trend_pnl is reported as 0.0 and trend_trades as 0.
 This prevents regime-hostile windows from contaminating TrendBot R:R diagnostics.
 
+Supervisor Resume Diagnostic (Step 1, r8):
+  _supervisor_resume_diagnostic(df_trend) scans each trend window for the first
+  CRASH/CORRECTION → RECOVERY or BULL transition. Reports:
+    first_resume_bar  : bar index of first RECOVERY bar (relative to trend window start)
+    first_resume_ts   : timestamp of first RECOVERY bar
+    first_bull_bar    : bar index of first BULL bar
+    first_bull_ts     : timestamp of first BULL bar
+    transitions       : full regime5 change sequence [(bar, ts, regime5), ...]
+  This distinguishes three supervisor failure modes:
+    Never resumes  → resume gate too strict (relax RSI/EMA thresholds)
+    Resumes late   → recovery_bars too long (shorten from 168 → 96 or 72)
+    Resumes briefly then falls back → hysteresis too narrow (add hold bars)
+
 Cycle pairs — MODERATE/DEEP corrections (dd >= 12%) that trigger MacroSupervisor
 CORRECTION state and activate CorrectionBot signal conditions.
 Trend windows start 15+ days after correction trough so MacroSupervisor
 min_pause_h1_bars=336 (14 days) is satisfied before TrendBot opens.
 
   CyA  #C01 May-Jun22  DEEP (-56%)    corr ends 2022-06-18  trend starts 2022-07-15
-       Replaced original Mar-Apr22 trend window (85.2% CRASH — regime-hostile).
        Jun22 ETH trough ~$900; Jul-Aug22 clean RECOVERY→BULL +47% move.
   CyB  #C07 Feb23      MODERATE (-11%)  corr ends 2023-02-16  trend starts 2023-03-05
-  CyC  #C11 Apr-May24  DEEP     (-22%)  corr ends 2024-05-01  trend starts 2024-05-16
-  CyD  #C15 Feb25      MODERATE (-14%)  corr ends 2025-02-28  trend starts 2025-03-15
+  CyC  #C11 Apr-May24  DEEP     (-22%)  corr ends 2024-05-01  trend starts 2024-06-01
+       r8: pushed from 2024-05-16 (22.8% tradeable, CRASH dominant) to 2024-06-01
+       ETH $2,900→$3,800 Jun-Jul24 confirmed BULL move.
+  CyD  #C15 Feb25      MODERATE (-14%)  corr ends 2025-02-28  trend starts 2025-04-01
+       r8: pushed from 2025-03-15 (23.7% tradeable, CRASH dominant) to 2025-04-01
+       ETH confirmed RECOVERY→BULL post-Feb25 trough into Apr-May25.
 
 Capital split: $400 total — $200 CorrectionBot, $200 TrendBot (50/50).
 Baselines computed live for fair comparison.
@@ -63,9 +79,12 @@ v1 history:
       Added regime5 window distribution diagnostic (bar counts + % per cycle).
   r7  Added I6 MIN_TRADEABLE_PCT=0.25 gate — skip TrendBot if BULL+RECOVERY < 25%
       of trend window bars, log as SKIPPED in results.
-      Replaced CyA trend window: Mar-Apr22 (85.2% CRASH, regime-hostile) →
-      Jul-Aug22 (ETH Jun22 trough, clean RECOVERY→BULL +47%). Correction window
-      updated to May-Jun22 DEEP -56% to form a valid cycle pair.
+      Replaced CyA trend window: Mar-Apr22 (85.2% CRASH) → Jul-Aug22 (clean RECOVERY→BULL).
+  r8  Added Supervisor Resume Diagnostic: _supervisor_resume_diagnostic() prints
+      first RECOVERY/BULL bar, timestamp, and full regime5 transition sequence per
+      cycle. Distinguishes never-resumes / late-resume / brief-resume failure modes.
+      CyC trend window: 2024-05-16 → 2024-06-01 (pushed past CRASH-dominant period).
+      CyD trend window: 2025-03-15 → 2025-04-01 (pushed to confirmed RECOVERY→BULL).
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -126,9 +145,9 @@ CYCLE_PAIRS = [
             "dd_pct":   -22,
         },
         "trend": {
-            "label":    "#T07 May-Jun24",
-            "start":    "2024-05-16",   # +15d past trough
-            "end":      "2024-06-20",
+            "label":    "#T07 Jun-Jul24",
+            "start":    "2024-06-01",   # r8: pushed from 2024-05-16 (CRASH dominant 42%)
+            "end":      "2024-07-10",   # ETH $2,900→$3,800 Jun-Jul24 confirmed BULL
             "strength": "MODERATE",
         },
     },
@@ -142,34 +161,31 @@ CYCLE_PAIRS = [
             "dd_pct":   -14,
         },
         "trend": {
-            "label":    "#T10 Mar-Apr25",
-            "start":    "2025-03-15",   # +15d past trough
-            "end":      "2025-04-10",
+            "label":    "#T10 Apr-May25",
+            "start":    "2025-04-01",   # r8: pushed from 2025-03-15 (CRASH dominant 47%)
+            "end":      "2025-05-01",   # ETH confirmed RECOVERY→BULL post-Feb25 trough
             "strength": "MODERATE",
         },
     },
 ]
 
-LOOKBACK_DAYS  = 30
-HOLD_BUFFER    = 60
-TOTAL_CAPITAL  = 400.0
-CORR_CAPITAL   = TOTAL_CAPITAL * 0.5
-TREND_CAPITAL  = TOTAL_CAPITAL * 0.5
+LOOKBACK_DAYS     = 30
+HOLD_BUFFER       = 60
+TOTAL_CAPITAL     = 400.0
+CORR_CAPITAL      = TOTAL_CAPITAL * 0.5
+TREND_CAPITAL     = TOTAL_CAPITAL * 0.5
 MIN_TRADEABLE_PCT = 0.25   # I6: skip TrendBot if BULL+RECOVERY < 25% of trend window
 
 # I3 lag thresholds by correction severity (5m bars)
 _I3_LAG_THRESHOLDS = {
-    "SHALLOW":  72,    #  6h — mild correction, supervisor resumes quickly
-    "MODERATE": 72,    #  6h — same as shallow (14d min pause already enforced)
-    "DEEP":     288,   # 24h — deep corrections need more time for RSI/EMA recovery
+    "SHALLOW":  72,    #  6h
+    "MODERATE": 72,    #  6h
+    "DEEP":     288,   # 24h
 }
 _I3_LAG_DEFAULT = 72
 
-# Valid regime5 values at each boundary (see I5 docstring above)
 _VALID_CORR_END_REGIMES    = {"CORRECTION", "CRASH", "RECOVERY"}
 _VALID_TREND_START_REGIMES = {"BULL", "RECOVERY", "RANGE", "CORRECTION", "CRASH"}
-
-# All regime5 states for distribution table
 _ALL_REGIMES = ["BULL", "RECOVERY", "RANGE", "CORRECTION", "CRASH"]
 
 
@@ -197,6 +213,95 @@ def _tradeable_pct(dist: dict) -> float:
     """BULL% + RECOVERY% from a regime5 distribution dict."""
     return (dist.get("BULL", {}).get("pct", 0.0) +
             dist.get("RECOVERY", {}).get("pct", 0.0))
+
+
+def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
+    """
+    Scan trend window for supervisor resume events.
+
+    Returns a dict with:
+      first_recovery_bar   : bar index of first RECOVERY bar (-1 if none)
+      first_recovery_ts    : timestamp of first RECOVERY bar (None if none)
+      first_bull_bar       : bar index of first BULL bar (-1 if none)
+      first_bull_ts        : timestamp of first BULL bar (None if none)
+      transitions          : list of (bar_idx, ts_str, regime5) for every
+                             regime5 *change* in the window (sampled at change
+                             boundaries only, not every bar)
+      failure_mode         : one of:
+                             'never_resumes'   — 0 BULL+RECOVERY bars in window
+                             'resumes_late'    — first RECOVERY/BULL > 25% into window
+                             'resumes_briefly' — BULL+RECOVERY < 30% AND some exist
+                             'ok'              — tradeable >= 30%
+
+    Distinguishes three MacroSupervisor failure modes when trend windows are
+    SKIPPED or regime-hostile:
+      never_resumes  → resume gate conditions (RSI/EMA) are too strict
+      resumes_late   → recovery_bars param is too long
+      resumes_briefly→ hysteresis too narrow, falls back into CRASH/CORRECTION
+    """
+    if "regime5" not in df_trend.columns or len(df_trend) == 0:
+        return {
+            "first_recovery_bar": -1, "first_recovery_ts": None,
+            "first_bull_bar": -1,     "first_bull_ts": None,
+            "transitions": [],        "failure_mode": "never_resumes",
+        }
+
+    total_bars = len(df_trend)
+
+    # Build transition sequence (only at regime5 change boundaries)
+    transitions = []
+    prev_r5 = None
+    for i, row in df_trend.iterrows():
+        r5 = str(row.get("regime5", ""))
+        if r5 != prev_r5:
+            ts_str = str(row["ts"])[:16] if "ts" in df_trend.columns else str(i)
+            transitions.append((int(i), ts_str, r5))
+            prev_r5 = r5
+
+    # Find first RECOVERY and first BULL bar (positional, not iloc)
+    first_recovery_bar = -1
+    first_recovery_ts  = None
+    first_bull_bar     = -1
+    first_bull_ts      = None
+
+    for pos, (orig_idx, ts_str, r5) in enumerate(transitions):
+        if first_recovery_bar == -1 and r5 == "RECOVERY":
+            first_recovery_bar = orig_idx
+            first_recovery_ts  = ts_str
+        if first_bull_bar == -1 and r5 == "BULL":
+            first_bull_bar = orig_idx
+            first_bull_ts  = ts_str
+        if first_recovery_bar >= 0 and first_bull_bar >= 0:
+            break
+
+    # Classify failure mode
+    bull_bars     = int((df_trend["regime5"] == "BULL").sum())
+    recovery_bars = int((df_trend["regime5"] == "RECOVERY").sum())
+    tradeable_bars = bull_bars + recovery_bars
+    tradeable_frac = tradeable_bars / max(total_bars, 1)
+
+    first_resume_bar = min(
+        first_recovery_bar if first_recovery_bar >= 0 else total_bars,
+        first_bull_bar     if first_bull_bar     >= 0 else total_bars,
+    )
+
+    if tradeable_bars == 0:
+        failure_mode = "never_resumes"
+    elif first_resume_bar / max(total_bars, 1) > 0.25:
+        failure_mode = "resumes_late"
+    elif tradeable_frac < 0.30:
+        failure_mode = "resumes_briefly"
+    else:
+        failure_mode = "ok"
+
+    return {
+        "first_recovery_bar": first_recovery_bar,
+        "first_recovery_ts":  first_recovery_ts,
+        "first_bull_bar":     first_bull_bar,
+        "first_bull_ts":      first_bull_ts,
+        "transitions":        transitions,
+        "failure_mode":       failure_mode,
+    }
 
 
 def run_cycle(cycle: dict, symbol: str,
@@ -232,9 +337,9 @@ def run_cycle(cycle: dict, symbol: str,
         if len(df_corr) < 10 or len(df_trend) < 10:
             return {"label": cycle["label"], "error": "insufficient slice data"}
 
-        # Compute regime5 distribution for the trend window before backtest
-        trend_r5_dist = _regime5_distribution(df_trend)
-        tradeable     = _tradeable_pct(trend_r5_dist)
+        trend_r5_dist  = _regime5_distribution(df_trend)
+        tradeable      = _tradeable_pct(trend_r5_dist)
+        resume_diag    = _supervisor_resume_diagnostic(df_trend)
 
         cp       = CORRECTION_PRESETS[corr_preset]
         corr_bot = CorrectionBot(symbol=symbol.replace("/", "-"))
@@ -243,7 +348,6 @@ def run_cycle(cycle: dict, symbol: str,
         _, corr_base = CorrectionBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_corr, cp, CORR_CAPITAL, corr_preset)
 
-        # I6 — skip TrendBot if trend window is regime-hostile
         trend_skipped = tradeable < (MIN_TRADEABLE_PCT * 100)
 
         if trend_skipped:
@@ -301,6 +405,7 @@ def run_cycle(cycle: dict, symbol: str,
             "regime_at_corr_end":    regime_at_corr_end,
             "regime_at_trend_start": regime_at_trend_start,
             "trend_r5_dist":         trend_r5_dist,
+            "resume_diag":           resume_diag,
             "error":                 None,
         }
 
@@ -344,11 +449,6 @@ def _check_overlap(corr_tdf: pd.DataFrame, trend_tdf: pd.DataFrame) -> int:
 
 def _calc_transition_lag(df_trend: pd.DataFrame,
                          trend_tdf: pd.DataFrame) -> int:
-    """
-    Bars from trend window open (trend_start_ts) to first TrendBot BUY.
-    Uses df_trend (already sliced to trend window) so bar 0 = trend_start.
-    Returns -1 if TrendBot made no trades in the window.
-    """
     if trend_tdf is None or trend_tdf.empty:
         return -1
     buys = trend_tdf[trend_tdf["side"] == "BUY"]
@@ -420,7 +520,35 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
-    # ── Regime5 window distribution diagnostic ────────────────────────────
+    # ── Supervisor Resume Diagnostic ──────────────────────────────────────
+    print(f"\n{sep}")
+    print(f" Supervisor Resume Diagnostic (trend window regime5 transition sequence)")
+    print(f" Failure modes: never_resumes=gate too strict | resumes_late=recovery_bars too long")
+    print(f"                resumes_briefly=hysteresis too narrow | ok=supervisor healthy")
+    print(sep)
+    for r in h_rows:
+        diag   = r.get("resume_diag", {})
+        mode   = diag.get("failure_mode", "unknown")
+        r_bar  = diag.get("first_recovery_bar", -1)
+        r_ts   = diag.get("first_recovery_ts", "n/a")
+        b_bar  = diag.get("first_bull_bar", -1)
+        b_ts   = diag.get("first_bull_ts", "n/a")
+        trans  = diag.get("transitions", [])
+        skip_s = " [SKIPPED]" if r["trend_skipped"] else ""
+        print(f"\n  {r['label']}{skip_s}  failure_mode={mode}")
+        r_s = f"bar {r_bar} @ {r_ts}" if r_bar >= 0 else "NEVER"
+        b_s = f"bar {b_bar} @ {b_ts}" if b_bar >= 0 else "NEVER"
+        print(f"    First RECOVERY : {r_s}")
+        print(f"    First BULL     : {b_s}")
+        if trans:
+            seq = "  ".join(f"{t[2]}@{t[1]}" for t in trans[:12])
+            suffix = f"  ... (+{len(trans)-12} more)" if len(trans) > 12 else ""
+            print(f"    Transitions    : {seq}{suffix}")
+        else:
+            print(f"    Transitions    : (none)")
+    print(sep)
+
+    # ── Regime5 window distribution ─────────────────────────────────────────
     print(f"\n{sep}")
     print(f" Regime5 Distribution in Trend Windows (TrendBot eligibility)")
     print(sep)
@@ -431,7 +559,7 @@ def print_results(results: list) -> None:
     print(hdr)
     print(f"  {sep2[:80]}")
     for r in h_rows:
-        dist = r.get("trend_r5_dist", {})
+        dist  = r.get("trend_r5_dist", {})
         row_s = f"  {r['label']:<18}"
         tradeable = 0.0
         for r5 in _ALL_REGIMES:
@@ -457,15 +585,14 @@ def print_results(results: list) -> None:
     show("I2  No capital breach (each bot within allocated slice)",
          True, "(structural — separate capital pools)")
 
-    # I3: per-cycle lag check — skip SKIPPED cycles (no TrendBot ran)
     i3_rows = [r for r in h_rows if not r["trend_skipped"]]
     i3_pass = True
     i3_details = []
     for r in i3_rows:
-        lag     = r["transition_lag_bars"]
-        sev     = r["corr_severity"]
-        thresh  = _I3_LAG_THRESHOLDS.get(sev, _I3_LAG_DEFAULT)
-        ok      = (lag <= thresh) if lag >= 0 else True
+        lag    = r["transition_lag_bars"]
+        sev    = r["corr_severity"]
+        thresh = _I3_LAG_THRESHOLDS.get(sev, _I3_LAG_DEFAULT)
+        ok     = (lag <= thresh) if lag >= 0 else True
         if not ok:
             i3_pass = False
         i3_details.append(f"{r['label']}:{lag}b/{thresh}b")
@@ -508,7 +635,7 @@ def print_results(results: list) -> None:
           f"{'CorrExit':<14} {'TrendTrades':>12} {'TrendWR':>8} {'TrendPSL':>9}")
     print(f"  {sep2[:80]}")
     for r in h_rows:
-        corr_wr_s  = f"{r['corr_wr']*100:.0f}%" if r['corr_buys'] > 0 else "n/a"
+        corr_wr_s = f"{r['corr_wr']*100:.0f}%" if r['corr_buys'] > 0 else "n/a"
         if r["trend_skipped"]:
             trend_wr_s = "SKIPPED"
             trend_t    = "-"
@@ -529,7 +656,7 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
-    # ── TrendBot exit breakdown (only non-skipped cycles) ─────────────────
+    # ── TrendBot exit breakdown (non-skipped only) ─────────────────────────
     active_rows = [r for r in h_rows if not r["trend_skipped"]]
     if active_rows:
         print(f"\n{sep}")
@@ -643,7 +770,8 @@ def main():
                 f"combined={r['combined_pnl']:+.2f}  "
                 f"tradeable={r['trend_tradeable_pct']:.1f}%  "
                 f"lag={r['transition_lag_bars']}bars  "
-                f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}"
+                f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}  "
+                f"resume={r['resume_diag'].get('failure_mode','?')}"
                 f"{skip_tag}"
             )
         return r
