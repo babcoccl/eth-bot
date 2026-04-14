@@ -2,7 +2,7 @@
 """
 eth_test_harness_integration_v1.py
 ===================================
-Integration test: MacroSupervisor v27 orchestrating CorrectionBot v1 and
+Integration test: MacroSupervisor v28 orchestrating CorrectionBot v1 and
 TrendBot v1 across 4 full CORRECTION → TREND cycle pairs (2022-2026).
 
 Validates:
@@ -85,6 +85,12 @@ v1 history:
       cycle. Distinguishes never-resumes / late-resume / brief-resume failure modes.
       CyC trend window: 2024-05-16 → 2024-06-01 (pushed past CRASH-dominant period).
       CyD trend window: 2025-03-15 → 2025-04-01 (pushed to confirmed RECOVERY→BULL).
+  r9  Wired MacroSupervisor v28 (was v27). v28 adds three hysteresis params:
+        bull_hold_bars=96       — hold BULL 4d before RANGE downgrade allowed
+        recovery_hold_bars=48   — block re-pause 2d after any resume
+        rapid_descent_block_bars=96 — block rapid_descent re-pause 4d after resume
+      Added SUPERVISOR_VERSION banner to startup output so the active version
+      is always visible in run logs.
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -97,9 +103,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
 from eth_helpers             import fetch_ohlcv, prepare_indicators
-from eth_macrosupervisor_v27 import MacroSupervisor
+from eth_macrosupervisor_v28 import MacroSupervisor          # r9: v27 → v28
 from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
+
+SUPERVISOR_VERSION = "v28"   # bump this whenever the supervisor import changes
 
 # ── Cycle definitions ──────────────────────────────────────────────────────
 CYCLE_PAIRS = [
@@ -232,12 +240,6 @@ def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
                              'resumes_late'    — first RECOVERY/BULL > 25% into window
                              'resumes_briefly' — BULL+RECOVERY < 30% AND some exist
                              'ok'              — tradeable >= 30%
-
-    Distinguishes three MacroSupervisor failure modes when trend windows are
-    SKIPPED or regime-hostile:
-      never_resumes  → resume gate conditions (RSI/EMA) are too strict
-      resumes_late   → recovery_bars param is too long
-      resumes_briefly→ hysteresis too narrow, falls back into CRASH/CORRECTION
     """
     if "regime5" not in df_trend.columns or len(df_trend) == 0:
         return {
@@ -248,7 +250,6 @@ def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
 
     total_bars = len(df_trend)
 
-    # Build transition sequence (only at regime5 change boundaries)
     transitions = []
     prev_r5 = None
     for i, row in df_trend.iterrows():
@@ -258,7 +259,6 @@ def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
             transitions.append((int(i), ts_str, r5))
             prev_r5 = r5
 
-    # Find first RECOVERY and first BULL bar (positional, not iloc)
     first_recovery_bar = -1
     first_recovery_ts  = None
     first_bull_bar     = -1
@@ -274,9 +274,8 @@ def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
         if first_recovery_bar >= 0 and first_bull_bar >= 0:
             break
 
-    # Classify failure mode
-    bull_bars     = int((df_trend["regime5"] == "BULL").sum())
-    recovery_bars = int((df_trend["regime5"] == "RECOVERY").sum())
+    bull_bars      = int((df_trend["regime5"] == "BULL").sum())
+    recovery_bars  = int((df_trend["regime5"] == "RECOVERY").sum())
     tradeable_bars = bull_bars + recovery_bars
     tradeable_frac = tradeable_bars / max(total_bars, 1)
 
@@ -464,7 +463,7 @@ def print_results(results: list) -> None:
     sep2 = "-" * 80
 
     print(f"\n{sep}")
-    print(f" Integration Test v1 — MacroSupervisor + CorrectionBot + TrendBot")
+    print(f" Integration Test v1 — MacroSupervisor {SUPERVISOR_VERSION} + CorrectionBot + TrendBot")
     print(sep)
     print(f"  {'Cycle':<18} {'dd%':>5} {'CorrPnL':>9} {'TrendPnL':>9} {'Combined':>9} "
           f"{'Baseline':>9} {'Delta':>8} {'Overlap':>8} {'Lag(bars)':>10} {'TrdPct':>7}")
@@ -737,7 +736,7 @@ def main():
         from eth_helpers import clear_ohlcv_cache
         clear_ohlcv_cache()
 
-    print(f"Integration Test v1 — MacroSupervisor + CorrectionBot + TrendBot")
+    print(f"Integration Test v1 — MacroSupervisor {SUPERVISOR_VERSION} + CorrectionBot + TrendBot")
     print(f"=" * 60)
     print(f"Correction preset : {args.corr_preset}")
     print(f"Trend preset      : {args.trend_preset}")
