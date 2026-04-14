@@ -29,6 +29,14 @@ v1 history:
        Added MIN_TRADEABLE_RUN_BARS=576 concentration gate to I6.
        Added _max_contiguous_tradeable_run() helper.
        CyA trend window: 2022-07-15 -> 2022-08-08 (+24d, captures Aug22 BULL arc).
+  r11  CyC trend window: 2024-06-01->2024-07-10 => 2024-07-21->2024-08-20
+         Rationale: r10 window opened into Jun-Jul CRASH chop (BULL=0%, R:R=0.75).
+         Jul-21 is after the last Jun-Jul CRASH cluster; First BULL appears ~Jul-21
+         in the supervisor transition log. 30d window maintained.
+       CyD trend window: 2025-04-01->2025-05-01 => 2025-04-28->2025-05-28
+         Rationale: r10 window opened 2025-04-01 in full CRASH (lag=2583 bars, 9d).
+         Supervisor's second sustained RECOVERY begins 2025-04-28 after the
+         Apr-13 re-crash and Apr-25 CRASH cluster clear. 30d window maintained.
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -41,7 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
 from eth_helpers             import fetch_ohlcv, prepare_indicators
-from eth_macrosupervisor_v29 import MacroSupervisor          # r10: v28 -> v29
+from eth_macrosupervisor_v29 import MacroSupervisor
 from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
 
@@ -91,9 +99,9 @@ CYCLE_PAIRS = [
             "dd_pct":   -22,
         },
         "trend": {
-            "label":    "#T07 Jun-Jul24",
-            "start":    "2024-06-01",
-            "end":      "2024-07-10",
+            "label":    "#T07 Jul-Aug24",
+            "start":    "2024-07-21",   # r11: pushed from 2024-06-01 -- bypasses Jun-Jul CRASH chop
+            "end":      "2024-08-20",   # r11: 30d window
             "strength": "MODERATE",
         },
     },
@@ -108,8 +116,8 @@ CYCLE_PAIRS = [
         },
         "trend": {
             "label":    "#T10 Apr-May25",
-            "start":    "2025-04-01",
-            "end":      "2025-05-01",
+            "start":    "2025-04-28",   # r11: pushed from 2025-04-01 -- opens inside 2nd RECOVERY wave
+            "end":      "2025-05-28",   # r11: 30d window
             "strength": "MODERATE",
         },
     },
