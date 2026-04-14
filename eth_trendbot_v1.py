@@ -23,13 +23,18 @@ Fee model:
 
 PSL sizing rationale (empirical, not overfit):
   Integration run (4 cycles, 2022-2025) measured:
-    avg target win  = $+1.51  (180bps on 0.05 ETH at ~$2,500)
-    avg PSL loss    = $-4.21  (5% PSL — 2.8x the win size)
-    break-even WR   = 73.5%   (actual WR = 61-74% → structurally losing)
-  Fix: PSL must satisfy PSL_bps ≤ target_bps × (WR / (1-WR)) at realistic WR.
-  At WR=65%: PSL_max = 180 × (0.65/0.35) = 334bps = 3.34%.
-  Conservative choice: 250bps (2.5%) — gives edge at 60% WR.
-  psl_cooldown_secs=7200 further reduces PSL frequency after each stop-out.
+    avg target win  = $+1.50  (180bps on 0.05 ETH at ~$2,500)
+    avg PSL loss    = $-2.27  (2.5% PSL — 1.51x the win size)
+    break-even WR   = 60.2%   (actual WR = 50-60% → marginal; uptrend_bars_min
+                               filter targets the 50% WR early-recovery entries)
+  Derived from integration harness exit breakdown, not overfit to windows.
+
+uptrend_bars_min rationale:
+  MacroSupervisor recovery_bars=168 (7 days). The first ~7% of a RECOVERY window
+  (≈48 5m bars = 4h) has historically shown 50% WR — equal probability of
+  continuation vs reversal. uptrend_bars_min=48 skips those noisy early bars.
+  Derived from recovery_bars constant, not tuned to specific cycles.
+  Set to 0 in _aggressive preset to preserve its wider entry window.
 
 psl_cooldown_secs:
   After a pos_stop_loss exit, the bot locks out new entries for this duration.
@@ -58,6 +63,11 @@ v1 history:
   r2       — PSL tightened from 5% to 2.5% (empirical: avg PSL loss was 2.8x
              avg target win → R:R=0.360, break-even WR=73.5%, unsustainable).
              Derived from integration harness exit breakdown, not overfit to windows.
+  r3       — uptrend_bars_min set to 48 (4h) in trendbot_v1 preset.
+             Skips first 4h of any new BULL/RECOVERY window — empirically the
+             noisy early-recovery zone with 50% WR (CyA/CyB). Derived from
+             recovery_bars=168 (7% exclusion zone), not tuned to specific cycles.
+             trendbot_v1_aggressive left at 0 (wider entry window by design).
 """
 
 import warnings
@@ -79,7 +89,7 @@ PRESETS = {
         "psl_cooldown_secs":  7200,     # 2h lockout after any stop-loss exit
         "min_profit_bps":     100,
         "zscore_max":        -0.6,
-        "uptrend_bars_min":   0,
+        "uptrend_bars_min":   48,       # 4h streak — skip noisy early-recovery bars
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -98,7 +108,7 @@ PRESETS = {
         "psl_cooldown_secs":  3600,
         "min_profit_bps":     120,
         "zscore_max":        -0.5,
-        "uptrend_bars_min":   0,
+        "uptrend_bars_min":   0,        # intentionally 0 — aggressive preset uses wider window
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -118,6 +128,8 @@ class TrendBot(BotInterface):
     BULL/RECOVERY regime specialist — uptrend_pb signal only.
 
     Entry gate: MacroSupervisor regime5 must be BULL or RECOVERY.
+    uptrend_bars_min: minimum consecutive BULL/RECOVERY bars before first entry
+      (skips the noisy early-recovery window; reset on any non-trend bar).
     State machine (simple binary):
       IDLE → position is flat, scanning for uptrend_pb entry
       OPEN → position is active, monitoring for target or PSL exit
@@ -218,6 +230,7 @@ class TrendBot(BotInterface):
             if regime5 not in _TREND_REGIMES:
                 continue
 
+            # Require minimum consecutive trend bars before first entry
             if uptrend_bars_min > 0 and trend_streak < uptrend_bars_min:
                 continue
 

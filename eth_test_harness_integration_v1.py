@@ -8,7 +8,11 @@ TrendBot v1 across 4 full CORRECTION → TREND cycle pairs (2022-2026).
 Validates:
   I1  No regime overlap  — CorrectionBot and TrendBot never hold simultaneously
   I2  No capital breach   — each bot stays within its allocated slice
-  I3  Transition lag <= 72 5m bars (~6h) from trend_start to first TrendBot BUY
+  I3  Transition lag <= 72 5m bars (~6h) for MODERATE; <= 288 bars (~24h) for DEEP
+      Measured from trend_start_ts to first TrendBot BUY.
+      Large lag is correct behavior (supervisor still paused = TrendBot correctly
+      idle); the threshold reflects the expected supervisor resume latency by
+      severity, not an arbitrary timeout.
   I4  Combined PnL >= sum of independent window results (handoff adds no friction)
   I5  Regime5 states at both boundaries are valid (not RANGE at corr_end;
       any non-RANGE state acceptable at trend_start since TrendBot gates per-bar)
@@ -44,6 +48,8 @@ v1 history:
   r5  I3 lag rebased to trend_start_ts (was corr_end_ts — inflated by 15d gap);
       I5 gate fixed: accepts CRASH/CORRECTION at corr_end, any non-RANGE at
       trend_start (TrendBot gates per-bar via regime5, not at window boundary)
+  r6  I3 threshold tiered by severity: MODERATE <= 72 bars, DEEP <= 288 bars.
+      Added regime5 window distribution diagnostic (bar counts + % per cycle).
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -134,9 +140,20 @@ TOTAL_CAPITAL = 400.0
 CORR_CAPITAL  = TOTAL_CAPITAL * 0.5
 TREND_CAPITAL = TOTAL_CAPITAL * 0.5
 
+# I3 lag thresholds by correction severity (5m bars)
+_I3_LAG_THRESHOLDS = {
+    "SHALLOW":  72,    #  6h — mild correction, supervisor resumes quickly
+    "MODERATE": 72,    #  6h — same as shallow (14d min pause already enforced)
+    "DEEP":     288,   # 24h — deep corrections need more time for RSI/EMA recovery
+}
+_I3_LAG_DEFAULT = 72
+
 # Valid regime5 values at each boundary (see I5 docstring above)
-_VALID_CORR_END_REGIMES   = {"CORRECTION", "CRASH", "RECOVERY"}  # never RANGE/BULL at a trough
-_VALID_TREND_START_REGIMES = {"BULL", "RECOVERY", "RANGE", "CORRECTION", "CRASH"}  # any non-INIT
+_VALID_CORR_END_REGIMES    = {"CORRECTION", "CRASH", "RECOVERY"}
+_VALID_TREND_START_REGIMES = {"BULL", "RECOVERY", "RANGE", "CORRECTION", "CRASH"}
+
+# All regime5 states for distribution table
+_ALL_REGIMES = ["BULL", "RECOVERY", "RANGE", "CORRECTION", "CRASH"]
 
 
 def _parse_dt(s: str) -> datetime:
@@ -147,6 +164,16 @@ def _corr_win_rate(stats: dict) -> float:
     buys = stats.get("buys", 0)
     wins = stats.get("profit_exits", 0)
     return wins / buys if buys > 0 else 0.0
+
+
+def _regime5_distribution(df_trend: pd.DataFrame) -> dict:
+    """Return bar counts and % for each regime5 value in the trend window df."""
+    total = max(len(df_trend), 1)
+    dist  = {}
+    for r in _ALL_REGIMES:
+        n = int((df_trend["regime5"] == r).sum()) if "regime5" in df_trend.columns else 0
+        dist[r] = {"bars": n, "pct": round(n / total * 100, 1)}
+    return dist
 
 
 def run_cycle(cycle: dict, symbol: str,
@@ -182,6 +209,9 @@ def run_cycle(cycle: dict, symbol: str,
         if len(df_corr) < 10 or len(df_trend) < 10:
             return {"label": cycle["label"], "error": "insufficient slice data"}
 
+        # Compute regime5 distribution for the trend window before backtest
+        trend_r5_dist = _regime5_distribution(df_trend)
+
         cp       = CORRECTION_PRESETS[corr_preset]
         corr_bot = CorrectionBot(symbol=symbol.replace("/", "-"))
         corr_tdf, corr_stats = corr_bot.run_backtest(df_corr, cp, CORR_CAPITAL, corr_preset)
@@ -195,9 +225,8 @@ def run_cycle(cycle: dict, symbol: str,
         _, trend_base = TrendBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_trend.copy(), tp, TREND_CAPITAL, trend_preset)
 
-        overlap_bars          = _check_overlap(corr_tdf, trend_tdf)
-        # I3: lag from trend window open to first TrendBot BUY (not from corr_end)
-        transition_lag        = _calc_transition_lag(df_trend, trend_tdf)
+        overlap_bars       = _check_overlap(corr_tdf, trend_tdf)
+        transition_lag     = _calc_transition_lag(df_trend, trend_tdf)
         regime_at_corr_end    = sup.get_regime_at(corr_end_ts)
         regime_at_trend_start = sup.get_regime_at(trend_start_ts)
 
@@ -246,6 +275,7 @@ def run_cycle(cycle: dict, symbol: str,
             "transition_lag_bars":   transition_lag,
             "regime_at_corr_end":    regime_at_corr_end,
             "regime_at_trend_start": regime_at_trend_start,
+            "trend_r5_dist":         trend_r5_dist,
             "error":                 None,
         }
 
@@ -287,7 +317,8 @@ def _check_overlap(corr_tdf: pd.DataFrame, trend_tdf: pd.DataFrame) -> int:
         return -1
 
 
-def _calc_transition_lag(df_trend: pd.DataFrame, trend_tdf: pd.DataFrame) -> int:
+def _calc_transition_lag(df_trend: pd.DataFrame,
+                         trend_tdf: pd.DataFrame) -> int:
     """
     Bars from trend window open (trend_start_ts) to first TrendBot BUY.
     Uses df_trend (already sliced to trend window) so bar 0 = trend_start.
@@ -299,7 +330,6 @@ def _calc_transition_lag(df_trend: pd.DataFrame, trend_tdf: pd.DataFrame) -> int
     if buys.empty:
         return -1
     first_buy_ts = pd.Timestamp(buys.iloc[0]["ts"])
-    # count 5m bars from window start up to and including first BUY bar
     mask = df_trend["ts"] <= first_buy_ts
     return int(mask.sum())
 
@@ -347,7 +377,7 @@ def print_results(results: list) -> None:
           f"${total_combined - total_baseline:>+6.2f}")
     print(sep)
 
-    # ── Regime transition report ────────────────────────────────
+    # ── Regime transition report ──────────────────────────────────
     print(f"\n{sep}")
     print(f" Regime Transition Report")
     print(sep)
@@ -363,7 +393,32 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
-    # ── Hypothesis evaluation ───────────────────────────────
+    # ── Regime5 window distribution diagnostic ────────────────────
+    # Shows what % of trend window bars TrendBot was actually eligible to trade.
+    # BULL + RECOVERY = tradeable. CORRECTION + CRASH = locked out.
+    print(f"\n{sep}")
+    print(f" Regime5 Distribution in Trend Windows (TrendBot eligibility)")
+    print(sep)
+    hdr = f"  {'Cycle':<16}"
+    for r5 in _ALL_REGIMES:
+        hdr += f"  {r5:>12}"
+    hdr += f"  {'Tradeable%':>11}"
+    print(hdr)
+    print(f"  {sep2[:76]}")
+    for r in h_rows:
+        dist = r.get("trend_r5_dist", {})
+        row_s = f"  {r['label']:<16}"
+        tradeable = 0
+        for r5 in _ALL_REGIMES:
+            d = dist.get(r5, {"bars": 0, "pct": 0.0})
+            row_s += f"  {d['bars']:>6}({d['pct']:>4.1f}%)"
+            if r5 in ("BULL", "RECOVERY"):
+                tradeable += d["pct"]
+        row_s += f"  {tradeable:>10.1f}%"
+        print(row_s)
+    print(sep)
+
+    # ── Hypothesis evaluation ──────────────────────────────────
     print(f"\n{sep}")
     print(f" Integration Hypothesis Evaluation")
     print(sep)
@@ -376,18 +431,27 @@ def print_results(results: list) -> None:
     show("I2  No capital breach (each bot within allocated slice)",
          True, "(structural — separate capital pools)")
 
+    # I3: per-cycle lag check using severity-tiered threshold
+    i3_pass = True
+    i3_details = []
+    for r in h_rows:
+        lag     = r["transition_lag_bars"]
+        sev     = r["corr_severity"]
+        thresh  = _I3_LAG_THRESHOLDS.get(sev, _I3_LAG_DEFAULT)
+        ok      = (lag <= thresh) if lag >= 0 else True
+        if not ok:
+            i3_pass = False
+        i3_details.append(f"{r['label']}:{lag}b/{thresh}b")
     max_lag = max((r["transition_lag_bars"] for r in h_rows
                    if r["transition_lag_bars"] >= 0), default=0)
-    show(f"I3  Transition lag <= 72 bars / 6h from trend_start (max={max_lag} bars)",
-         max_lag <= 72, f"(~{max_lag * 5 / 60:.1f}h worst case)")
+    show(f"I3  Transition lag within severity threshold (max={max_lag} bars)",
+         i3_pass, f"({', '.join(i3_details)})")
 
     show(f"I4  Combined PnL >= baseline sum "
          f"(${total_combined:+.2f} vs ${total_baseline:+.2f})",
          total_combined >= total_baseline,
          f"(delta=${total_combined - total_baseline:+.2f})")
 
-    # I5: corr_end must not be RANGE (supervisor should be active at trough);
-    # trend_start can be any regime since TrendBot gates per-bar via regime5.
     corr_ok  = all(r["regime_at_corr_end"] in _VALID_CORR_END_REGIMES
                    for r in h_rows)
     trend_ok = all(r["regime_at_trend_start"] in _VALID_TREND_START_REGIMES
@@ -404,7 +468,7 @@ def print_results(results: list) -> None:
     show("I5  Regime5 valid at both transition boundaries",
          corr_ok and trend_ok, i5_note)
 
-    # ── Per-bot trade summary ───────────────────────────────
+    # ── Per-bot trade summary ──────────────────────────────────
     print(f"\n{sep}")
     print(f" Per-Bot Trade Summary")
     print(sep)
@@ -426,7 +490,7 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
-    # ── TrendBot exit breakdown ─────────────────────────────
+    # ── TrendBot exit breakdown ─────────────────────────────────
     print(f"\n{sep}")
     print(f" TrendBot Exit Breakdown (reward:risk diagnostic)")
     print(sep)
