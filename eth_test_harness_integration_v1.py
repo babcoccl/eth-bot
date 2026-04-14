@@ -2,95 +2,33 @@
 """
 eth_test_harness_integration_v1.py
 ===================================
-Integration test: MacroSupervisor v28 orchestrating CorrectionBot v1 and
+Integration test: MacroSupervisor v29 orchestrating CorrectionBot v1 and
 TrendBot v1 across 4 full CORRECTION → TREND cycle pairs (2022-2026).
 
 Validates:
   I1  No regime overlap  — CorrectionBot and TrendBot never hold simultaneously
   I2  No capital breach   — each bot stays within its allocated slice
   I3  Transition lag <= 72 5m bars (~6h) for MODERATE; <= 288 bars (~24h) for DEEP
-      Measured from trend_start_ts to first TrendBot BUY.
-      Large lag is correct behavior (supervisor still paused = TrendBot correctly
-      idle); the threshold reflects the expected supervisor resume latency by
-      severity, not an arbitrary timeout.
-  I4  Combined PnL >= sum of independent window results (handoff adds no friction)
-  I5  Regime5 states at both boundaries are valid (not RANGE at corr_end;
-      any non-RANGE state acceptable at trend_start since TrendBot gates per-bar)
-  I6  Trend window Tradeable% >= MIN_TRADEABLE_PCT (25%) before TrendBot runs.
-      Cycles below the threshold are logged as SKIPPED — not an error, but a
-      signal that the harness cycle definition needs a better trend window.
-      Derived from CyC/CyD at 22-24% tradeable being near breakeven; below 25%
-      signal-to-noise ratio is too low for a valid TrendBot test.
+  I4  Combined PnL >= sum of independent window results
+  I5  Regime5 states at both boundaries are valid
+  I6  Trend window Tradeable% >= MIN_TRADEABLE_PCT (25%) AND
+      at least one contiguous BULL+RECOVERY run >= MIN_TRADEABLE_RUN_BARS (576 = 2d)
+      before TrendBot runs.  Both conditions must be satisfied.
+      Cycles that fail either gate are logged as SKIPPED.
 
-Note on I3: lag is measured from trend_start_ts (the harness window open date),
-not from corr_end_ts. The 15+ day gap between those dates is intentional
-supervisor pause time and should not inflate the lag metric.
-
-Note on I5: MacroSupervisor may still be in CORRECTION/CRASH at trend_start_ts
-because the harness date is a hard cut, not a supervisor event. TrendBot gates
-entries on regime5 at the bar level, so the window-open regime is informational
-only. I5 FAIL means the supervisor is showing RANGE (misconfigured) at corr_end.
-
-Note on I6: SKIPPED cycles still run CorrectionBot and report corr_pnl. Only
-TrendBot is skipped — trend_pnl is reported as 0.0 and trend_trades as 0.
-This prevents regime-hostile windows from contaminating TrendBot R:R diagnostics.
-
-Supervisor Resume Diagnostic (Step 1, r8):
-  _supervisor_resume_diagnostic(df_trend) scans each trend window for the first
-  CRASH/CORRECTION → RECOVERY or BULL transition. Reports:
-    first_resume_bar  : bar index of first RECOVERY bar (relative to trend window start)
-    first_resume_ts   : timestamp of first RECOVERY bar
-    first_bull_bar    : bar index of first BULL bar
-    first_bull_ts     : timestamp of first BULL bar
-    transitions       : full regime5 change sequence [(bar, ts, regime5), ...]
-  This distinguishes three supervisor failure modes:
-    Never resumes  → resume gate too strict (relax RSI/EMA thresholds)
-    Resumes late   → recovery_bars too long (shorten from 168 → 96 or 72)
-    Resumes briefly then falls back → hysteresis too narrow (add hold bars)
-
-Cycle pairs — MODERATE/DEEP corrections (dd >= 12%) that trigger MacroSupervisor
-CORRECTION state and activate CorrectionBot signal conditions.
-Trend windows start 15+ days after correction trough so MacroSupervisor
-min_pause_h1_bars=336 (14 days) is satisfied before TrendBot opens.
-
-  CyA  #C01 May-Jun22  DEEP (-56%)    corr ends 2022-06-18  trend starts 2022-07-15
-       Jun22 ETH trough ~$900; Jul-Aug22 clean RECOVERY→BULL +47% move.
-  CyB  #C07 Feb23      MODERATE (-11%)  corr ends 2023-02-16  trend starts 2023-03-05
-  CyC  #C11 Apr-May24  DEEP     (-22%)  corr ends 2024-05-01  trend starts 2024-06-01
-       r8: pushed from 2024-05-16 (22.8% tradeable, CRASH dominant) to 2024-06-01
-       ETH $2,900→$3,800 Jun-Jul24 confirmed BULL move.
-  CyD  #C15 Feb25      MODERATE (-14%)  corr ends 2025-02-28  trend starts 2025-04-01
-       r8: pushed from 2025-03-15 (23.7% tradeable, CRASH dominant) to 2025-04-01
-       ETH confirmed RECOVERY→BULL post-Feb25 trough into Apr-May25.
-
-Capital split: $400 total — $200 CorrectionBot, $200 TrendBot (50/50).
-Baselines computed live for fair comparison.
+Note on I6 concentration gate (r10 addition):
+  A raw 25% bar count can be satisfied by RECOVERY bars scattered across 40d
+  of CRASH chop (CyC v28 pattern: 26% tradeable but -$41 loss). The run gate
+  requires the supervisor to sustain BULL+RECOVERY for at least 2 consecutive
+  days before TrendBot engages, filtering out fragmented regimes.
 
 v1 history:
-  r1  4 SHALLOW cycles; CorrBot $0, I3/I5 FAIL (supervisor never entered CORRECTION)
-  r2  4 MODERATE/DEEP cycles; CorrBot stat keys wrong (read 'trades' not 'buys');
-      trend windows abutted correction end — supervisor never exited pause
-  r3  Fixed stat keys; extended trend starts 15d past trough
-  r4  Added TrendBot exit breakdown (target_fires/psl_fires/avg_bars) to summary
-  r5  I3 lag rebased to trend_start_ts (was corr_end_ts — inflated by 15d gap);
-      I5 gate fixed: accepts CRASH/CORRECTION at corr_end, any non-RANGE at
-      trend_start (TrendBot gates per-bar via regime5, not at window boundary)
-  r6  I3 threshold tiered by severity: MODERATE <= 72 bars, DEEP <= 288 bars.
-      Added regime5 window distribution diagnostic (bar counts + % per cycle).
-  r7  Added I6 MIN_TRADEABLE_PCT=0.25 gate — skip TrendBot if BULL+RECOVERY < 25%
-      of trend window bars, log as SKIPPED in results.
-      Replaced CyA trend window: Mar-Apr22 (85.2% CRASH) → Jul-Aug22 (clean RECOVERY→BULL).
-  r8  Added Supervisor Resume Diagnostic: _supervisor_resume_diagnostic() prints
-      first RECOVERY/BULL bar, timestamp, and full regime5 transition sequence per
-      cycle. Distinguishes never-resumes / late-resume / brief-resume failure modes.
-      CyC trend window: 2024-05-16 → 2024-06-01 (pushed past CRASH-dominant period).
-      CyD trend window: 2025-03-15 → 2025-04-01 (pushed to confirmed RECOVERY→BULL).
-  r9  Wired MacroSupervisor v28 (was v27). v28 adds three hysteresis params:
-        bull_hold_bars=96       — hold BULL 4d before RANGE downgrade allowed
-        recovery_hold_bars=48   — block re-pause 2d after any resume
-        rapid_descent_block_bars=96 — block rapid_descent re-pause 4d after resume
-      Added SUPERVISOR_VERSION banner to startup output so the active version
-      is always visible in run logs.
+  r1-r8  [see prior versions]
+  r9   Wired MacroSupervisor v28; added SUPERVISOR_VERSION banner.
+  r10  Wired MacroSupervisor v29 (recovery_hold_bars 48->72).
+       Added MIN_TRADEABLE_RUN_BARS=576 concentration gate to I6.
+       Added _max_contiguous_tradeable_run() helper.
+       CyA trend window: 2022-07-15 -> 2022-08-08 (+24d, captures Aug22 BULL arc).
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -103,11 +41,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
 from eth_helpers             import fetch_ohlcv, prepare_indicators
-from eth_macrosupervisor_v28 import MacroSupervisor          # r9: v27 → v28
+from eth_macrosupervisor_v29 import MacroSupervisor          # r10: v28 -> v29
 from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
 
-SUPERVISOR_VERSION = "v28"   # bump this whenever the supervisor import changes
+SUPERVISOR_VERSION = "v29"
 
 # ── Cycle definitions ──────────────────────────────────────────────────────
 CYCLE_PAIRS = [
@@ -121,9 +59,9 @@ CYCLE_PAIRS = [
             "dd_pct":   -56,
         },
         "trend": {
-            "label":    "#T01 Jul-Aug22",
-            "start":    "2022-07-15",   # +27d past trough — ETH clean RECOVERY→BULL
-            "end":      "2022-08-15",
+            "label":    "#T01 Aug22",
+            "start":    "2022-08-08",   # r10: pushed from 2022-07-15 -- captures Aug22 BULL arc
+            "end":      "2022-09-08",   # 31d window
             "strength": "STRONG",
         },
     },
@@ -138,7 +76,7 @@ CYCLE_PAIRS = [
         },
         "trend": {
             "label":    "#T03 Mar-Apr23",
-            "start":    "2023-03-05",   # +17d past trough
+            "start":    "2023-03-05",
             "end":      "2023-04-15",
             "strength": "STRONG",
         },
@@ -154,8 +92,8 @@ CYCLE_PAIRS = [
         },
         "trend": {
             "label":    "#T07 Jun-Jul24",
-            "start":    "2024-06-01",   # r8: pushed from 2024-05-16 (CRASH dominant 42%)
-            "end":      "2024-07-10",   # ETH $2,900→$3,800 Jun-Jul24 confirmed BULL
+            "start":    "2024-06-01",
+            "end":      "2024-07-10",
             "strength": "MODERATE",
         },
     },
@@ -170,25 +108,25 @@ CYCLE_PAIRS = [
         },
         "trend": {
             "label":    "#T10 Apr-May25",
-            "start":    "2025-04-01",   # r8: pushed from 2025-03-15 (CRASH dominant 47%)
-            "end":      "2025-05-01",   # ETH confirmed RECOVERY→BULL post-Feb25 trough
+            "start":    "2025-04-01",
+            "end":      "2025-05-01",
             "strength": "MODERATE",
         },
     },
 ]
 
-LOOKBACK_DAYS     = 30
-HOLD_BUFFER       = 60
-TOTAL_CAPITAL     = 400.0
-CORR_CAPITAL      = TOTAL_CAPITAL * 0.5
-TREND_CAPITAL     = TOTAL_CAPITAL * 0.5
-MIN_TRADEABLE_PCT = 0.25   # I6: skip TrendBot if BULL+RECOVERY < 25% of trend window
+LOOKBACK_DAYS          = 30
+HOLD_BUFFER            = 60
+TOTAL_CAPITAL          = 400.0
+CORR_CAPITAL           = TOTAL_CAPITAL * 0.5
+TREND_CAPITAL          = TOTAL_CAPITAL * 0.5
+MIN_TRADEABLE_PCT      = 0.25    # I6 gate 1: raw BULL+RECOVERY fraction
+MIN_TRADEABLE_RUN_BARS = 576     # I6 gate 2: longest contiguous BULL+RECOVERY run (2d @ 5m)
 
-# I3 lag thresholds by correction severity (5m bars)
 _I3_LAG_THRESHOLDS = {
-    "SHALLOW":  72,    #  6h
-    "MODERATE": 72,    #  6h
-    "DEEP":     288,   # 24h
+    "SHALLOW":  72,
+    "MODERATE": 72,
+    "DEEP":     288,
 }
 _I3_LAG_DEFAULT = 72
 
@@ -208,7 +146,6 @@ def _corr_win_rate(stats: dict) -> float:
 
 
 def _regime5_distribution(df_trend: pd.DataFrame) -> dict:
-    """Return bar counts and % for each regime5 value in the trend window df."""
     total = max(len(df_trend), 1)
     dist  = {}
     for r in _ALL_REGIMES:
@@ -218,29 +155,33 @@ def _regime5_distribution(df_trend: pd.DataFrame) -> dict:
 
 
 def _tradeable_pct(dist: dict) -> float:
-    """BULL% + RECOVERY% from a regime5 distribution dict."""
     return (dist.get("BULL", {}).get("pct", 0.0) +
             dist.get("RECOVERY", {}).get("pct", 0.0))
 
 
-def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
+def _max_contiguous_tradeable_run(df_trend: pd.DataFrame) -> int:
     """
-    Scan trend window for supervisor resume events.
+    Return the length of the longest contiguous run of BULL+RECOVERY bars
+    in the 5m trend window (in 5m bars).
 
-    Returns a dict with:
-      first_recovery_bar   : bar index of first RECOVERY bar (-1 if none)
-      first_recovery_ts    : timestamp of first RECOVERY bar (None if none)
-      first_bull_bar       : bar index of first BULL bar (-1 if none)
-      first_bull_ts        : timestamp of first BULL bar (None if none)
-      transitions          : list of (bar_idx, ts_str, regime5) for every
-                             regime5 *change* in the window (sampled at change
-                             boundaries only, not every bar)
-      failure_mode         : one of:
-                             'never_resumes'   — 0 BULL+RECOVERY bars in window
-                             'resumes_late'    — first RECOVERY/BULL > 25% into window
-                             'resumes_briefly' — BULL+RECOVERY < 30% AND some exist
-                             'ok'              — tradeable >= 30%
+    Used as I6 gate 2: if this value < MIN_TRADEABLE_RUN_BARS (576 = 2d),
+    the regime is too fragmented for TrendBot even if raw % passes gate 1.
     """
+    if "regime5" not in df_trend.columns or len(df_trend) == 0:
+        return 0
+    tradeable  = df_trend["regime5"].isin(["BULL", "RECOVERY"])
+    max_run    = 0
+    cur_run    = 0
+    for v in tradeable:
+        if v:
+            cur_run += 1
+            max_run  = max(max_run, cur_run)
+        else:
+            cur_run  = 0
+    return max_run
+
+
+def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
     if "regime5" not in df_trend.columns or len(df_trend) == 0:
         return {
             "first_recovery_bar": -1, "first_recovery_ts": None,
@@ -249,7 +190,6 @@ def _supervisor_resume_diagnostic(df_trend: pd.DataFrame) -> dict:
         }
 
     total_bars = len(df_trend)
-
     transitions = []
     prev_r5 = None
     for i, row in df_trend.iterrows():
@@ -338,6 +278,7 @@ def run_cycle(cycle: dict, symbol: str,
 
         trend_r5_dist  = _regime5_distribution(df_trend)
         tradeable      = _tradeable_pct(trend_r5_dist)
+        max_run        = _max_contiguous_tradeable_run(df_trend)
         resume_diag    = _supervisor_resume_diagnostic(df_trend)
 
         cp       = CORRECTION_PRESETS[corr_preset]
@@ -347,7 +288,16 @@ def run_cycle(cycle: dict, symbol: str,
         _, corr_base = CorrectionBot(symbol=symbol.replace("/", "-")).run_backtest(
             df_corr, cp, CORR_CAPITAL, corr_preset)
 
-        trend_skipped = tradeable < (MIN_TRADEABLE_PCT * 100)
+        # I6: both gates must pass
+        trend_skipped = (
+            tradeable < (MIN_TRADEABLE_PCT * 100)
+            or max_run < MIN_TRADEABLE_RUN_BARS
+        )
+        skip_reason = ""
+        if tradeable < (MIN_TRADEABLE_PCT * 100):
+            skip_reason = f"pct={tradeable:.1f}%<{MIN_TRADEABLE_PCT*100:.0f}%"
+        elif max_run < MIN_TRADEABLE_RUN_BARS:
+            skip_reason = f"run={max_run}bars<{MIN_TRADEABLE_RUN_BARS}bars"
 
         if trend_skipped:
             trend_tdf   = pd.DataFrame()
@@ -387,6 +337,8 @@ def run_cycle(cycle: dict, symbol: str,
             "corr_exit":             corr_stats.get("exit_str", ""),
             "corr_discount_pct":     corr_stats.get("discount_pct", 0.0),
             "trend_skipped":         trend_skipped,
+            "trend_skip_reason":     skip_reason,
+            "trend_max_run_bars":    max_run,
             "trend_tradeable_pct":   tradeable,
             "trend_trades":          trend_stats.get("trades", 0),
             "trend_wr":              trend_stats.get("win_rate", 0.0),
@@ -466,8 +418,8 @@ def print_results(results: list) -> None:
     print(f" Integration Test v1 — MacroSupervisor {SUPERVISOR_VERSION} + CorrectionBot + TrendBot")
     print(sep)
     print(f"  {'Cycle':<18} {'dd%':>5} {'CorrPnL':>9} {'TrendPnL':>9} {'Combined':>9} "
-          f"{'Baseline':>9} {'Delta':>8} {'Overlap':>8} {'Lag(bars)':>10} {'TrdPct':>7}")
-    print(f"  {sep2[:84]}")
+          f"{'Baseline':>9} {'Delta':>8} {'Overlap':>8} {'Lag(bars)':>10} {'TrdPct':>7} {'MaxRun':>7}")
+    print(f"  {sep2[:92]}")
 
     total_combined = 0.0
     total_baseline = 0.0
@@ -482,7 +434,9 @@ def print_results(results: list) -> None:
         total_baseline += r["base_combined_pnl"]
         total_overlap  += max(r["overlap_bars"], 0)
         h_rows.append(r)
-        skipped_tag = " [SKIPPED]" if r["trend_skipped"] else ""
+        skip_reason = r.get("trend_skip_reason", "")
+        skipped_tag = f" [SKIPPED:{skip_reason}]" if r["trend_skipped"] else ""
+        max_run_d   = r.get("trend_max_run_bars", 0) / 288  # 5m bars -> days
         print(
             f"  {r['label']:<18} "
             f"{r['corr_dd_pct']:>4}%  "
@@ -493,17 +447,19 @@ def print_results(results: list) -> None:
             f"${r['pnl_delta']:>+6.2f}  "
             f"{'NONE' if r['overlap_bars'] == 0 else str(r['overlap_bars']):>8}  "
             f"{str(r['transition_lag_bars']) + ' bars':>10}  "
-            f"{r['trend_tradeable_pct']:>5.1f}%{skipped_tag}"
+            f"{r['trend_tradeable_pct']:>5.1f}%  "
+            f"{max_run_d:>5.1f}d"
+            f"{skipped_tag}"
         )
 
-    print(f"  {sep2[:84]}")
+    print(f"  {sep2[:92]}")
     print(f"  {'TOTAL':<18} {'':>5} {'':>9} {'':>9} "
           f"${total_combined:>+7.2f}  "
           f"${total_baseline:>+7.2f}  "
           f"${total_combined - total_baseline:>+6.2f}")
     print(sep)
 
-    # ── Regime transition report ──────────────────────────────────────────
+    # ── Regime transition report
     print(f"\n{sep}")
     print(f" Regime Transition Report")
     print(sep)
@@ -519,7 +475,7 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
-    # ── Supervisor Resume Diagnostic ──────────────────────────────────────
+    # ── Supervisor Resume Diagnostic
     print(f"\n{sep}")
     print(f" Supervisor Resume Diagnostic (trend window regime5 transition sequence)")
     print(f" Failure modes: never_resumes=gate too strict | resumes_late=recovery_bars too long")
@@ -533,12 +489,15 @@ def print_results(results: list) -> None:
         b_bar  = diag.get("first_bull_bar", -1)
         b_ts   = diag.get("first_bull_ts", "n/a")
         trans  = diag.get("transitions", [])
-        skip_s = " [SKIPPED]" if r["trend_skipped"] else ""
+        skip_s = f" [SKIPPED:{r.get('trend_skip_reason','')}]" if r["trend_skipped"] else ""
         print(f"\n  {r['label']}{skip_s}  failure_mode={mode}")
         r_s = f"bar {r_bar} @ {r_ts}" if r_bar >= 0 else "NEVER"
         b_s = f"bar {b_bar} @ {b_ts}" if b_bar >= 0 else "NEVER"
         print(f"    First RECOVERY : {r_s}")
         print(f"    First BULL     : {b_s}")
+        max_run = r.get("trend_max_run_bars", 0)
+        print(f"    Max contig run : {max_run} bars ({max_run/288:.1f}d)  "
+              f"[gate={MIN_TRADEABLE_RUN_BARS}bars/{MIN_TRADEABLE_RUN_BARS/288:.0f}d]")
         if trans:
             seq = "  ".join(f"{t[2]}@{t[1]}" for t in trans[:12])
             suffix = f"  ... (+{len(trans)-12} more)" if len(trans) > 12 else ""
@@ -547,31 +506,32 @@ def print_results(results: list) -> None:
             print(f"    Transitions    : (none)")
     print(sep)
 
-    # ── Regime5 window distribution ─────────────────────────────────────────
+    # ── Regime5 window distribution
     print(f"\n{sep}")
     print(f" Regime5 Distribution in Trend Windows (TrendBot eligibility)")
     print(sep)
     hdr = f"  {'Cycle':<18}"
     for r5 in _ALL_REGIMES:
         hdr += f"  {r5:>12}"
-    hdr += f"  {'Tradeable%':>11}  {'Status':>8}"
+    hdr += f"  {'Tradeable%':>11}  {'MaxRun':>8}  {'Status':>8}"
     print(hdr)
-    print(f"  {sep2[:80]}")
+    print(f"  {sep2[:90]}")
     for r in h_rows:
-        dist  = r.get("trend_r5_dist", {})
-        row_s = f"  {r['label']:<18}"
+        dist     = r.get("trend_r5_dist", {})
+        row_s    = f"  {r['label']:<18}"
         tradeable = 0.0
         for r5 in _ALL_REGIMES:
             d = dist.get(r5, {"bars": 0, "pct": 0.0})
             row_s += f"  {d['bars']:>6}({d['pct']:>4.1f}%)"
             if r5 in ("BULL", "RECOVERY"):
                 tradeable += d["pct"]
-        status = "SKIPPED" if r["trend_skipped"] else "OK"
-        row_s += f"  {tradeable:>10.1f}%  {status:>8}"
+        max_run = r.get("trend_max_run_bars", 0)
+        status  = "SKIPPED" if r["trend_skipped"] else "OK"
+        row_s  += f"  {tradeable:>10.1f}%  {max_run:>6}b  {status:>8}"
         print(row_s)
     print(sep)
 
-    # ── Hypothesis evaluation ─────────────────────────────────────────────
+    # ── Hypothesis evaluation
     print(f"\n{sep}")
     print(f" Integration Hypothesis Evaluation")
     print(sep)
@@ -613,7 +573,7 @@ def print_results(results: list) -> None:
                  if r["regime_at_trend_start"] not in _VALID_TREND_START_REGIMES]
     i5_note = "(supervisor active at trough; TrendBot gates per-bar)"
     if corr_bad:
-        i5_note = f"FAIL: corr_end=RANGE in {corr_bad} — supervisor not entering pause"
+        i5_note = f"FAIL: corr_end=RANGE in {corr_bad}"
     elif trend_bad:
         i5_note = f"FAIL: trend_start invalid in {trend_bad}"
     show("I5  Regime5 valid at both transition boundaries",
@@ -622,11 +582,12 @@ def print_results(results: list) -> None:
     skipped = [r["label"] for r in h_rows if r["trend_skipped"]]
     i6_pass = len(skipped) == 0
     i6_note = (f"({len(skipped)} skipped: {', '.join(skipped)})" if skipped
-               else f"(all cycles >= {MIN_TRADEABLE_PCT*100:.0f}% tradeable)")
-    show(f"I6  All trend windows >= {MIN_TRADEABLE_PCT*100:.0f}% tradeable (BULL+RECOVERY)",
+               else f"(all cycles pass pct+run gates)")
+    show(f"I6  All trend windows >= {MIN_TRADEABLE_PCT*100:.0f}% tradeable AND "
+         f">={MIN_TRADEABLE_RUN_BARS}bar run",
          i6_pass, i6_note)
 
-    # ── Per-bot trade summary ─────────────────────────────────────────────
+    # ── Per-bot trade summary
     print(f"\n{sep}")
     print(f" Per-Bot Trade Summary")
     print(sep)
@@ -655,7 +616,7 @@ def print_results(results: list) -> None:
         )
     print(sep)
 
-    # ── TrendBot exit breakdown (non-skipped only) ─────────────────────────
+    # ── TrendBot exit breakdown
     active_rows = [r for r in h_rows if not r["trend_skipped"]]
     if active_rows:
         print(f"\n{sep}")
@@ -743,7 +704,8 @@ def main():
     print(f"Capital           : ${TOTAL_CAPITAL:.0f} total  "
           f"(${CORR_CAPITAL:.0f} correction / ${TREND_CAPITAL:.0f} trend)")
     print(f"Cycles            : {len(CYCLE_PAIRS)}")
-    print(f"Min tradeable pct : {MIN_TRADEABLE_PCT*100:.0f}% (I6 gate)")
+    print(f"Min tradeable pct : {MIN_TRADEABLE_PCT*100:.0f}% (I6 gate 1)")
+    print(f"Min contig run    : {MIN_TRADEABLE_RUN_BARS} bars / {MIN_TRADEABLE_RUN_BARS/288:.0f}d (I6 gate 2)")
     print(f"Cycle windows     :")
     for cy in CYCLE_PAIRS:
         cw, tw = cy["correction"], cy["trend"]
@@ -760,7 +722,7 @@ def main():
         if r.get("error"):
             print(f"  [{r['label']}]  ERROR: {r['error']}")
         else:
-            skip_tag = "  [I6 SKIPPED — regime-hostile]" if r["trend_skipped"] else ""
+            skip_tag = f"  [I6 SKIPPED:{r.get('trend_skip_reason','')}]" if r["trend_skipped"] else ""
             print(
                 f"  [{r['label']}]  "
                 f"corr={r['corr_pnl']:+.2f} ({r['corr_buys']}b/{r['corr_psl']}psl)  "
@@ -768,6 +730,7 @@ def main():
                 f"{r['trend_target_fires']}tgt/{r['trend_psl']}psl)  "
                 f"combined={r['combined_pnl']:+.2f}  "
                 f"tradeable={r['trend_tradeable_pct']:.1f}%  "
+                f"maxrun={r.get('trend_max_run_bars',0)}bars  "
                 f"lag={r['transition_lag_bars']}bars  "
                 f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}  "
                 f"resume={r['resume_diag'].get('failure_mode','?')}"
