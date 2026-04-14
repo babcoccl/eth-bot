@@ -5,7 +5,7 @@ eth_trendbot_v1.py — TrendBot (BULL / RECOVERY specialist)
 Role : Trades uptrend pullbacks during BULL and RECOVERY regimes only.
 Signal : uptrend_pb — RSI pullback while MacroSupervisor regime5 is BULL or RECOVERY
 Exit : target_bps fixed profit target (limit order = maker fill)
-Safety : pos_stop_loss_pct (5%) — tight, fail fast (market = taker fill)
+Safety : pos_stop_loss_pct (2.5%) — sized to match target scale; market = taker fill
 DCA : NONE — one fill per position, orchestrator adds capital
 Size : base_qty scaled by trend_strength (qty_scale) — risk management only,
        does not affect signal logic or entry/exit conditions
@@ -20,6 +20,16 @@ Fee model:
   sell_fee_pct = 0.00025  (maker — limit order placed at target price)
   round-trip   = 0.090%   = 90 bps
   target_bps must be > 90 to break even; recommended >= 180 (2x fee buffer)
+
+PSL sizing rationale (empirical, not overfit):
+  Integration run (4 cycles, 2022-2025) measured:
+    avg target win  = $+1.51  (180bps on 0.05 ETH at ~$2,500)
+    avg PSL loss    = $-4.21  (5% PSL — 2.8x the win size)
+    break-even WR   = 73.5%   (actual WR = 61-74% → structurally losing)
+  Fix: PSL must satisfy PSL_bps ≤ target_bps × (WR / (1-WR)) at realistic WR.
+  At WR=65%: PSL_max = 180 × (0.65/0.35) = 334bps = 3.34%.
+  Conservative choice: 250bps (2.5%) — gives edge at 60% WR.
+  psl_cooldown_secs=7200 further reduces PSL frequency after each stop-out.
 
 psl_cooldown_secs:
   After a pos_stop_loss exit, the bot locks out new entries for this duration.
@@ -45,6 +55,9 @@ HOLDOUT  : 2025-12-30 → 2026-01-06 (RECOVERY, 7d, +7.9%)
 v1 history:
   initial  — used regime_h1 == "UPTREND" gate; MacroSupervisor never writes
              regime_h1 so every entry was silently skipped. Fixed to regime5.
+  r2       — PSL tightened from 5% to 2.5% (empirical: avg PSL loss was 2.8x
+             avg target win → R:R=0.360, break-even WR=73.5%, unsustainable).
+             Derived from integration harness exit breakdown, not overfit to windows.
 """
 
 import warnings
@@ -59,7 +72,7 @@ PRESETS = {
     "trendbot_v1": {
         "base_qty":           0.05,
         "target_bps":         180,
-        "pos_stop_loss_pct":  0.05,
+        "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
         "uptrend_rsi_max":    44,
         "vol_mult_min":       0.80,
         "cooldown_secs":      1800,
@@ -78,7 +91,7 @@ PRESETS = {
     "trendbot_v1_aggressive": {
         "base_qty":           0.05,
         "target_bps":         220,
-        "pos_stop_loss_pct":  0.06,
+        "pos_stop_loss_pct":  0.030,    # 300bps — proportional to wider target
         "uptrend_rsi_max":    48,
         "vol_mult_min":       0.70,
         "cooldown_secs":      1200,
