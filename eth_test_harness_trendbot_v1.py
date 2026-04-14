@@ -57,6 +57,9 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
         if shift > 0:
             print(f"    [shift+{shift}d] {window['label']} resolved at {start_dt.date()}")
 
+        # Inject window-level trend strength so qty_scale in the bot can act on it
+        df_run["trend_strength"] = window["strength"]
+
         bot = TrendBot(symbol=symbol.replace("/", "-"))
         return bot.run_backtest(df_run, p, capital, preset_name)
 
@@ -100,7 +103,7 @@ def print_results(results, capital, preset_name):
           f"{'':>6}  {total_psl:>3}  {total_tgt:>3}  ${total_pnl:>+7.2f}")
     print(sep)
 
-    # ── Hypothesis evaluation ─────────────────────────────────────────────────
+    # ── Hypothesis evaluation ────────────────────────────────────────────
     print(f"\n{sep}")
     print(f" TrendBot v1 — HYPOTHESIS EVALUATION")
     print(sep)
