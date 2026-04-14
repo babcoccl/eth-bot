@@ -12,15 +12,20 @@ Validates:
   I4  Combined PnL >= sum of independent window results (handoff adds no friction)
   I5  Regime5 at correction end is CORRECTION; at trend start is BULL or RECOVERY
 
-Cycle pairs (correction end date == trend start date):
-  Cy1  #C04 Jul22      (ends 2022-08-05)  →  #T02 Aug22      (starts 2022-08-05)
-  Cy2  #C10 Oct23      (ends 2023-10-12)  →  #T05 Oct-Nov23  (starts 2023-10-12)
-  Cy3  #C13 Sep24      (ends 2024-09-12)  →  #T08 Sep-Oct24  (starts 2024-09-12)
-  Cy4  #C16 Jun25      (ends 2025-07-02)  →  #T12 Jul-Aug25  (starts 2025-07-06)
+Cycle pairs — MODERATE/DEEP corrections (dd >= 12%) that trigger MacroSupervisor
+CORRECTION state and activate CorrectionBot signal conditions:
+  CyA  #C01 Mar22  MODERATE (-12%)  (ends 2022-03-14)  →  #T01 Mar-Apr22  (starts 2022-03-14)
+  CyB  #C07 Feb23  MODERATE (-11%)  (ends 2023-02-16)  →  #T03 Feb-Mar23  (starts 2023-02-16)
+  CyC  #C11 Apr24  DEEP     (-22%)  (ends 2024-05-01)  →  #T07 May-Jun24  (starts 2024-05-01)
+  CyD  #C15 Feb25  MODERATE (-14%)  (ends 2025-02-28)  →  #T10 Mar-Apr25  (starts 2025-02-28)
 
 Capital split: $400 total — $200 CorrectionBot, $200 TrendBot (50/50).
 Independent baseline uses same capital split for fair comparison.
 Baselines are computed live during the run for accuracy.
+
+v1 history:
+  initial  — 4 SHALLOW cycles; CorrBot PnL=$0, I3/I5 FAIL (supervisor never entered CORRECTION)
+  current  — replaced with 4 MODERATE/DEEP cycles to properly exercise both bots
 """
 
 import argparse, sys, os, tempfile, warnings
@@ -38,65 +43,72 @@ from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
 
 # ── Cycle definitions ──────────────────────────────────────────────────
+# All 4 corrections have peak-to-trough dd >= 12% so MacroSupervisor
+# enters CORRECTION state (pause_dd_trigger=0.12) and CorrectionBot
+# signal conditions are met.
 CYCLE_PAIRS = [
     {
-        "label":      "Cy1 Jul-Aug22",
+        "label":      "CyA Mar22",
         "correction": {
-            "label":    "#C04 Jul22",
-            "start":    "2022-07-30",
-            "end":      "2022-08-05",
-            "severity": "SHALLOW",
+            "label":    "#C01 Mar22",
+            "start":    "2022-03-02",   # peak before -12% drop
+            "end":      "2022-03-14",   # local trough / handoff
+            "severity": "MODERATE",
+            "dd_pct":   -12,
         },
         "trend": {
-            "label":    "#T02 Aug22",
-            "start":    "2022-08-05",
-            "end":      "2022-08-14",
-            "strength": "STRONG",
-        },
-    },
-    {
-        "label":      "Cy2 Oct-Nov23",
-        "correction": {
-            "label":    "#C10 Oct23",
-            "start":    "2023-10-03",
-            "end":      "2023-10-12",
-            "severity": "SHALLOW",
-        },
-        "trend": {
-            "label":    "#T05 Oct-Nov23",
-            "start":    "2023-10-12",
-            "end":      "2023-11-20",
-            "strength": "STRONG",
-        },
-    },
-    {
-        "label":      "Cy3 Sep-Oct24",
-        "correction": {
-            "label":    "#C13 Sep24",
-            "start":    "2024-09-03",
-            "end":      "2024-09-12",
-            "severity": "SHALLOW",
-        },
-        "trend": {
-            "label":    "#T08 Sep-Oct24",
-            "start":    "2024-09-12",
-            "end":      "2024-10-20",
+            "label":    "#T01 Mar-Apr22",
+            "start":    "2022-03-14",
+            "end":      "2022-04-02",
             "strength": "MODERATE",
         },
     },
     {
-        "label":      "Cy4 Jun-Aug25",
+        "label":      "CyB Feb23",
         "correction": {
-            "label":    "#C16 Jun25",
-            "start":    "2025-06-24",
-            "end":      "2025-07-02",
-            "severity": "SHALLOW",
+            "label":    "#C07 Feb23",
+            "start":    "2023-02-02",   # peak ~$1,700
+            "end":      "2023-02-16",   # trough ~$1,500 (-12%)
+            "severity": "MODERATE",
+            "dd_pct":   -11,
         },
         "trend": {
-            "label":    "#T12 Jul-Aug25",
-            "start":    "2025-07-06",
-            "end":      "2025-07-31",
+            "label":    "#T03 Feb-Mar23",
+            "start":    "2023-02-16",
+            "end":      "2023-04-15",
             "strength": "STRONG",
+        },
+    },
+    {
+        "label":      "CyC Apr-May24",
+        "correction": {
+            "label":    "#C11 Apr24",
+            "start":    "2024-04-08",   # peak ~$3,700 pre-halving
+            "end":      "2024-05-01",   # trough ~$2,900 (-22%)
+            "severity": "DEEP",
+            "dd_pct":   -22,
+        },
+        "trend": {
+            "label":    "#T07 May-Jun24",
+            "start":    "2024-05-01",
+            "end":      "2024-06-20",
+            "strength": "MODERATE",
+        },
+    },
+    {
+        "label":      "CyD Feb-Apr25",
+        "correction": {
+            "label":    "#C15 Feb25",
+            "start":    "2025-02-03",   # peak ~$2,900
+            "end":      "2025-02-28",   # trough ~$2,450 (-14%)
+            "severity": "MODERATE",
+            "dd_pct":   -14,
+        },
+        "trend": {
+            "label":    "#T10 Mar-Apr25",
+            "start":    "2025-02-28",
+            "end":      "2025-04-01",
+            "strength": "MODERATE",
         },
     },
 ]
@@ -180,27 +192,29 @@ def run_cycle(cycle: dict, symbol: str,
         base_combined = base_corr + base_trend
 
         return {
-            "label":                 cycle["label"],
-            "corr_label":           cw["label"],
-            "trend_label":          tw["label"],
-            "corr_trades":          corr_stats.get("trades", 0),
-            "corr_wr":              corr_stats.get("win_rate", 0.0),
-            "corr_psl":             corr_stats.get("psl_fires", 0),
-            "corr_pnl":             corr_pnl,
-            "trend_trades":         trend_stats.get("trades", 0),
-            "trend_wr":             trend_stats.get("win_rate", 0.0),
-            "trend_psl":            trend_stats.get("psl_fires", 0),
-            "trend_pnl":            trend_pnl,
-            "combined_pnl":         combined,
-            "base_corr_pnl":        base_corr,
-            "base_trend_pnl":       base_trend,
-            "base_combined_pnl":    base_combined,
-            "pnl_delta":            combined - base_combined,
-            "overlap_bars":         overlap_bars,
-            "transition_lag_bars":  transition_lag,
-            "regime_at_corr_end":   regime_at_corr_end,
-            "regime_at_trend_start":regime_at_trend_start,
-            "error":                None,
+            "label":                  cycle["label"],
+            "corr_label":            cw["label"],
+            "trend_label":           tw["label"],
+            "corr_severity":         cw.get("severity", ""),
+            "corr_dd_pct":           cw.get("dd_pct", 0),
+            "corr_trades":           corr_stats.get("trades", 0),
+            "corr_wr":               corr_stats.get("win_rate", 0.0),
+            "corr_psl":              corr_stats.get("psl_fires", 0),
+            "corr_pnl":              corr_pnl,
+            "trend_trades":          trend_stats.get("trades", 0),
+            "trend_wr":              trend_stats.get("win_rate", 0.0),
+            "trend_psl":             trend_stats.get("psl_fires", 0),
+            "trend_pnl":             trend_pnl,
+            "combined_pnl":          combined,
+            "base_corr_pnl":         base_corr,
+            "base_trend_pnl":        base_trend,
+            "base_combined_pnl":     base_combined,
+            "pnl_delta":             combined - base_combined,
+            "overlap_bars":          overlap_bars,
+            "transition_lag_bars":   transition_lag,
+            "regime_at_corr_end":    regime_at_corr_end,
+            "regime_at_trend_start": regime_at_trend_start,
+            "error":                 None,
         }
 
     finally:
@@ -264,7 +278,7 @@ def print_results(results: list) -> None:
     print(f"\n{sep}")
     print(f" Integration Test v1 — MacroSupervisor + CorrectionBot + TrendBot")
     print(sep)
-    print(f"  {'Cycle':<16} {'CorrPnL':>9} {'TrendPnL':>9} {'Combined':>9} "
+    print(f"  {'Cycle':<16} {'dd%':>5} {'CorrPnL':>9} {'TrendPnL':>9} {'Combined':>9} "
           f"{'Baseline':>9} {'Delta':>8} {'Overlap':>8} {'Lag(bars)':>10}")
     print(f"  {sep2[:78]}")
 
@@ -283,6 +297,7 @@ def print_results(results: list) -> None:
         h_rows.append(r)
         print(
             f"  {r['label']:<16} "
+            f"{r['corr_dd_pct']:>4}%  "
             f"${r['corr_pnl']:>+7.2f}  "
             f"${r['trend_pnl']:>+7.2f}  "
             f"${r['combined_pnl']:>+7.2f}  "
@@ -293,7 +308,7 @@ def print_results(results: list) -> None:
         )
 
     print(f"  {sep2[:78]}")
-    print(f"  {'TOTAL':<16} {'':>9} {'':>9} "
+    print(f"  {'TOTAL':<16} {'':>5} {'':>9} {'':>9} "
           f"${total_combined:>+7.2f}  "
           f"${total_baseline:>+7.2f}  "
           f"${total_combined - total_baseline:>+6.2f}")
@@ -302,10 +317,16 @@ def print_results(results: list) -> None:
     print(f"\n{sep}")
     print(f" Regime Transition Report")
     print(sep)
-    print(f"  {'Cycle':<16} {'Regime@CorrEnd':<20} {'Regime@TrendStart':<20}")
-    print(f"  {sep2[:56]}")
+    print(f"  {'Cycle':<16} {'dd%':>5} {'Severity':<12} {'Regime@CorrEnd':<20} {'Regime@TrendStart':<20}")
+    print(f"  {sep2[:73]}")
     for r in h_rows:
-        print(f"  {r['label']:<16} {r['regime_at_corr_end']:<20} {r['regime_at_trend_start']:<20}")
+        print(
+            f"  {r['label']:<16} "
+            f"{r['corr_dd_pct']:>4}%  "
+            f"{r['corr_severity']:<12} "
+            f"{r['regime_at_corr_end']:<20} "
+            f"{r['regime_at_trend_start']:<20}"
+        )
     print(sep)
 
     print(f"\n{sep}")
@@ -341,6 +362,24 @@ def print_results(results: list) -> None:
          corr_ok and trend_ok,
          "(CORRECTION end / BULL|RECOVERY start)")
 
+    # ── Per-bot trade summary ───────────────────────────────────────
+    print(f"\n{sep}")
+    print(f" Per-Bot Trade Summary")
+    print(sep)
+    print(f"  {'Cycle':<16} {'CorrTrades':>11} {'CorrWR':>8} {'TrendTrades':>12} {'TrendWR':>8}")
+    print(f"  {sep2[:57]}")
+    for r in h_rows:
+        corr_wr_s  = f"{r['corr_wr']*100:.0f}%"  if r['corr_trades'] > 0 else "  n/a"
+        trend_wr_s = f"{r['trend_wr']*100:.0f}%" if r['trend_trades'] > 0 else "  n/a"
+        print(
+            f"  {r['label']:<16} "
+            f"{r['corr_trades']:>11}  "
+            f"{corr_wr_s:>8}  "
+            f"{r['trend_trades']:>12}  "
+            f"{trend_wr_s:>8}"
+        )
+    print(sep)
+
     print(f"\n  Total combined PnL : ${total_combined:+.2f}")
     print(f"  Baseline sum       : ${total_baseline:+.2f}")
     print(f"  Supervisor delta   : ${total_combined - total_baseline:+.2f}")
@@ -369,6 +408,11 @@ def main():
     print(f"Capital           : ${TOTAL_CAPITAL:.0f} total  "
           f"(${CORR_CAPITAL:.0f} correction / ${TREND_CAPITAL:.0f} trend)")
     print(f"Cycles            : {len(CYCLE_PAIRS)}")
+    print(f"Cycle windows     :")
+    for cy in CYCLE_PAIRS:
+        cw, tw = cy["correction"], cy["trend"]
+        print(f"  {cy['label']:<16}  corr {cw['start']} → {cw['end']} ({cw['severity']}, {cw['dd_pct']}%)  "
+              f"trend {tw['start']} → {tw['end']}")
     print()
 
     results = []
@@ -380,9 +424,11 @@ def main():
         else:
             print(
                 f"  [{r['label']}]  "
-                f"corr={r['corr_pnl']:+.2f}  trend={r['trend_pnl']:+.2f}  "
+                f"corr={r['corr_pnl']:+.2f} ({r['corr_trades']}t)  "
+                f"trend={r['trend_pnl']:+.2f} ({r['trend_trades']}t)  "
                 f"combined={r['combined_pnl']:+.2f}  "
-                f"overlap={r['overlap_bars']}  lag={r['transition_lag_bars']}bars"
+                f"overlap={r['overlap_bars']}  lag={r['transition_lag_bars']}bars  "
+                f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}"
             )
         return r
 
