@@ -3,12 +3,17 @@
 eth_trendbot_v1.py — TrendBot (BULL / RECOVERY specialist)
 ==============================================================
 Role : Trades uptrend pullbacks during BULL and RECOVERY regimes only.
-Signal : uptrend_pb — RSI pullback in h1 UPTREND
+Signal : uptrend_pb — RSI pullback while MacroSupervisor regime5 is BULL or RECOVERY
 Exit : target_bps fixed profit target (limit order = maker fill)
 Safety : pos_stop_loss_pct (5%) — tight, fail fast (market = taker fill)
 DCA : NONE — one fill per position, orchestrator adds capital
 Size : base_qty scaled by trend_strength (qty_scale) — risk management only,
        does not affect signal logic or entry/exit conditions
+
+Regime column:
+  MacroSupervisor writes regime5 with values: BULL, RECOVERY, RANGE, CORRECTION, CRASH.
+  TrendBot gates entries on regime5 in ("BULL", "RECOVERY") only.
+  Do NOT use regime_h1 (a separate indicator column, not the supervisor state).
 
 Fee model:
   buy_fee_pct  = 0.00065  (taker — aggressive market buy on pullback signal)
@@ -27,7 +32,7 @@ qty_scale:
   windows from the sample entirely.
 
 Design principle: do ONE thing well.
-This bot only fires when the 1h trend is UP and price pulls back.
+This bot only fires when MacroSupervisor regime5 is BULL or RECOVERY and price pulls back.
 It does not trade ranges, it does not average down.
 The MacroSupervisor enables it in BULL/RECOVERY regimes.
 The LLM Orchestrator decides capital allocation.
@@ -36,6 +41,10 @@ Test windows (from regime_period_analyzer.py):
 PRIMARY  : 2025-07-06 → 2025-07-31 (RECOVERY→BULL, 25d, +28.2%)
 SECONDARY: 2025-05-08 → 2025-05-16 (BULL, 8.6d, +36.1%)
 HOLDOUT  : 2025-12-30 → 2026-01-06 (RECOVERY, 7d, +7.9%)
+
+v1 history:
+  initial  — used regime_h1 == "UPTREND" gate; MacroSupervisor never writes
+             regime_h1 so every entry was silently skipped. Fixed to regime5.
 """
 
 import warnings
@@ -87,11 +96,15 @@ PRESETS = {
     },
 }
 
+# Valid MacroSupervisor regime5 values that TrendBot operates in
+_TREND_REGIMES = frozenset({"BULL", "RECOVERY"})
+
 
 class TrendBot(BotInterface):
     """
     BULL/RECOVERY regime specialist — uptrend_pb signal only.
 
+    Entry gate: MacroSupervisor regime5 must be BULL or RECOVERY.
     State machine (simple binary):
       IDLE → position is flat, scanning for uptrend_pb entry
       OPEN → position is active, monitoring for target or PSL exit
@@ -156,22 +169,24 @@ class TrendBot(BotInterface):
         uptrend_bars_min = p.get("uptrend_bars_min", 0)
         qty_scale_map    = p.get("qty_scale", {})
 
-        uptrend_streak = 0
+        trend_streak = 0  # consecutive bars in BULL or RECOVERY
 
         for i in range(len(df)):
             row    = df.iloc[i]
             close  = float(row["close"])
             ts     = row["ts"]
-            regime = str(row.get("regime_h1", "RANGE"))
 
-            if regime == "UPTREND":
-                uptrend_streak += 1
+            # ── Use MacroSupervisor regime5 column (not regime_h1) ──────────
+            regime5 = str(row.get("regime5", "RANGE"))
+
+            if regime5 in _TREND_REGIMES:
+                trend_streak += 1
             else:
-                uptrend_streak = 0
+                trend_streak = 0
 
             self._equity_curve.append(self._cash + self._position.qty * close)
 
-            # ── MANAGE OPEN POSITION ──────────────────────────────────
+            # ── MANAGE OPEN POSITION ─────────────────────────────────
             if self._position.is_open:
                 unreal = (close - self._position.avg_entry) / self._position.avg_entry
 
@@ -185,11 +200,12 @@ class TrendBot(BotInterface):
 
                 continue
 
-            # ── SCAN FOR ENTRY (position flat) ────────────────────────
-            if regime != "UPTREND":
+            # ── SCAN FOR ENTRY (position flat) ───────────────────────
+            # Gate on MacroSupervisor BULL or RECOVERY regime
+            if regime5 not in _TREND_REGIMES:
                 continue
 
-            if uptrend_bars_min > 0 and uptrend_streak < uptrend_bars_min:
+            if uptrend_bars_min > 0 and trend_streak < uptrend_bars_min:
                 continue
 
             _rsi_raw = df["rsi"].iat[i]
@@ -215,8 +231,7 @@ class TrendBot(BotInterface):
                     and rsi    < rsi_prev
                     and zscore < zscore_max
                     and vol_r  >= vol_min):
-                # scale qty by trend strength — risk management, not signal filtering
-                strength     = str(row.get("trend_strength", "STRONG"))
+                strength      = str(row.get("trend_strength", "STRONG"))
                 effective_qty = base_qty * qty_scale_map.get(strength, 1.0)
                 self._buy(i, df, close, "uptrend_pb", effective_qty,
                           buy_fee_pct, target_bps, min_profit, sell_fee_pct)
@@ -227,7 +242,7 @@ class TrendBot(BotInterface):
 
         return self._build_result(capital, preset_name)
 
-    # ── Private methods ──────────────────────────────────────────────────
+    # ── Private methods ────────────────────────────────────────────
 
     def _reset(self, capital: float) -> None:
         self._cash         = float(capital)
@@ -264,16 +279,16 @@ class TrendBot(BotInterface):
         self._last_buy_ts = row["ts"]
 
         self._trades.append({
-            "ts":        row["ts"],
-            "side":      "BUY",
-            "reason":    reason,
-            "regime_h1": str(row.get("regime_h1", "")),
-            "price":     close,
-            "qty":       qty,
-            "fee":       fee,
-            "rsi":       float(df["rsi"].iat[i]) if not pd.isna(df["rsi"].iat[i]) else float("nan"),
-            "zscore":    float(row.get("zscore",    float("nan"))),
-            "vol_ratio": float(row.get("vol_ratio", float("nan"))),
+            "ts":       row["ts"],
+            "side":     "BUY",
+            "reason":   reason,
+            "regime5":  str(row.get("regime5", "")),
+            "price":    close,
+            "qty":      qty,
+            "fee":      fee,
+            "rsi":      float(df["rsi"].iat[i]) if not pd.isna(df["rsi"].iat[i]) else float("nan"),
+            "zscore":   float(row.get("zscore",    float("nan"))),
+            "vol_ratio":float(row.get("vol_ratio", float("nan"))),
             "pnl": 0.0, "pnl_after_fees": 0.0,
             "win": float("nan"), "bars_held": float("nan"),
             "exit_price": float("nan"),
@@ -299,16 +314,16 @@ class TrendBot(BotInterface):
         })
 
         self._trades.append({
-            "ts":        row["ts"],
-            "side":      "SELL",
-            "reason":    reason,
-            "regime_h1": str(row.get("regime_h1", "")),
-            "price":     close,
-            "qty":       p.qty,
-            "fee":       sell_fee,
-            "rsi":       float(df["rsi"].iat[i]) if not pd.isna(df["rsi"].iat[i]) else float("nan"),
-            "zscore":    float("nan"),
-            "vol_ratio": float("nan"),
+            "ts":       row["ts"],
+            "side":     "SELL",
+            "reason":   reason,
+            "regime5":  str(row.get("regime5", "")),
+            "price":    close,
+            "qty":      p.qty,
+            "fee":      sell_fee,
+            "rsi":      float(df["rsi"].iat[i]) if not pd.isna(df["rsi"].iat[i]) else float("nan"),
+            "zscore":   float("nan"),
+            "vol_ratio":float("nan"),
             "pnl":            pnl,
             "pnl_after_fees": pnl,
             "win":       1.0 if pnl > 0 else 0.0,
@@ -333,11 +348,11 @@ class TrendBot(BotInterface):
         sharpe  = (ret_s.mean() / ret_s.std() * np.sqrt(105_120)
                    if ret_s.std() > 0 else 0.0)
 
-        sells   = tdf[tdf["side"] == "SELL"]
-        real    = sells[~sells["reason"].isin(["end_of_period"])]
-        wins    = real[real["pnl_after_fees"] > 0]
-        psl_r   = real[real["reason"] == "pos_stop_loss"]
-        tgt_r   = real[real["reason"] == "target"]
+        sells = tdf[tdf["side"] == "SELL"]
+        real  = sells[~sells["reason"].isin(["end_of_period"])]
+        wins  = real[real["pnl_after_fees"] > 0]
+        psl_r = real[real["reason"] == "pos_stop_loss"]
+        tgt_r = real[real["reason"] == "target"]
 
         return tdf, {
             "preset":        preset_name,
