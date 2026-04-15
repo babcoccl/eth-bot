@@ -10,3 +10,5 @@ ohlcv_cache/9823a7b676973f43.parquet
 ohlcv_cache/a3723a33c7f2d15e.parquet
 ohlcv_cache/cdf96f07435653d2.parquet
 ohlcv_cache/de389a3d68493478.parquet
+ohlcv_cache/*
+_pycache__/*
