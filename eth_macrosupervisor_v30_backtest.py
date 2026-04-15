@@ -10,19 +10,18 @@ Strategy
   EXIT  : first CRASH signal OR hard stop from entry-peak (default -15%)
 
 BULL depth class is determined by CYCLE TROUGH -- the actual percentage
-drop from the last pre-crash peak (last BULL/RANGE bar before this BULL
-entry) to the minimum close between that bar and this entry bar.
+drop from the last SUBSTANTIAL pre-crash peak to the minimum close
+between that peak and this BULL entry.
 
-This correctly handles:
-  - Long multi-month crashes with embedded RANGE/CORRECTION sub-segments
-  - RANGE->BULL direct transitions (no crash between them)
-  - First-bar-of-history edge cases
+"Substantial" means a contiguous BULL/RANGE block of >= MIN_PEAK_BARS bars.
+This filters out brief RANGE blips that the regime classifier emits during
+bear-market consolidation, which would otherwise produce near-zero troughs.
 
 BULL class definitions
 ----------------------
   DEEP    : cycle_trough_pct <= -30%
   MID     : cycle_trough_pct in (-30%, -15%]
-  SHALLOW : cycle_trough_pct >  -15%  (or no preceding crash found)
+  SHALLOW : cycle_trough_pct >  -15%  (or no qualifying peak found)
 
 Outputs
 -------
@@ -35,6 +34,7 @@ Usage
   python eth_macrosupervisor_v30_backtest.py --start 2021-01-01 --end 2026-04-15
   python eth_macrosupervisor_v30_backtest.py --stop-loss 0.12
   python eth_macrosupervisor_v30_backtest.py --out ./backtest_out/
+  python eth_macrosupervisor_v30_backtest.py --debug
 """
 
 from __future__ import annotations
@@ -71,8 +71,13 @@ class _TempDB:
 DEEP_THRESHOLD    = -0.30   # cycle trough <= -30% -> DEEP
 SHALLOW_THRESHOLD = -0.15   # cycle trough >  -15% -> SHALLOW
 
-PAUSE_REGIMES     = {"CRASH", "CORRECTION", "RECOVERY"}
-PEAK_REGIMES      = {"BULL", "RANGE"}       # regimes that represent price strength
+PAUSE_REGIMES  = {"CRASH", "CORRECTION", "RECOVERY"}
+PEAK_REGIMES   = {"BULL", "RANGE"}
+
+# Minimum contiguous BULL/RANGE bars to qualify as a real peak segment.
+# Filters out brief RANGE blips emitted during bear-market consolidation.
+# 12 bars = 12 hours; tune up if still getting noise.
+MIN_PEAK_BARS = 12
 
 
 def classify_bull_depth(cycle_trough_pct: float) -> str:
@@ -84,47 +89,75 @@ def classify_bull_depth(cycle_trough_pct: float) -> str:
     return "MID"
 
 
-def _cycle_trough_pct(regime_arr, close_arr, entry_idx: int) -> float:
+def _cycle_trough_pct(
+    regime_arr,
+    close_arr,
+    entry_idx: int,
+    min_peak_bars: int = MIN_PEAK_BARS,
+    debug: bool = False,
+) -> float:
     """
     Compute the true cycle trough preceding a BULL entry.
 
     Algorithm
     ---------
-    1. Walk backwards from entry_idx-1 to find the most recent bar
-       where the regime was BULL or RANGE (a "peak regime" bar).
-       This is the reference point regardless of what came between
-       (handles embedded RANGE bars within long crashes).
+    Walk backwards from entry_idx-1 to find the last CONTIGUOUS block of
+    BULL/RANGE bars with length >= min_peak_bars.  Use the LAST bar of that
+    block (closest to the crash) as the reference price.
 
-    2. ref_price = close at that bar.
+    trough = (min(close[ref_bar+1 : entry_idx]) / close[ref_bar]) - 1
 
-    3. trough = (min(close[ref_bar+1 : entry_idx]) / ref_price) - 1
+    This correctly handles:
+      - Brief RANGE blips within bear markets (ignored -- too short)
+      - Long multi-month crashes with embedded noise segments
+      - RANGE->BULL direct transitions (window will be short; trough ~0)
 
-    Returns 0.0 if no prior BULL/RANGE bar exists (start of history).
+    Returns 0.0 (SHALLOW) if no qualifying peak block is found.
     """
-    # Step 1: find the most recent prior BULL or RANGE bar
-    ref_bar = -1
-    for j in range(entry_idx - 1, -1, -1):
-        if str(regime_arr[j]) in PEAK_REGIMES:
-            ref_bar = j
+    j = entry_idx - 1
+
+    while j >= 0:
+        # Skip non-peak bars (CRASH / CORRECTION / RECOVERY)
+        while j >= 0 and str(regime_arr[j]) not in PEAK_REGIMES:
+            j -= 1
+
+        if j < 0:
             break
 
-    if ref_bar == -1:
-        # No prior peak regime found -- start of history, treat as SHALLOW
-        return 0.0
+        # Found a peak-regime bar at j.  Measure how long this
+        # contiguous block extends backwards.
+        block_end = j
+        while j >= 0 and str(regime_arr[j]) in PEAK_REGIMES:
+            j -= 1
+        block_start = j + 1
+        block_len   = block_end - block_start + 1
 
-    ref_price = float(close_arr[ref_bar])
-    if ref_price <= 0:
-        return 0.0
+        if block_len >= min_peak_bars:
+            # This is a qualifying peak segment; use its last bar
+            ref_bar   = block_end
+            ref_price = float(close_arr[ref_bar])
 
-    # Step 2: min close between ref_bar (exclusive) and entry_idx (exclusive)
-    window = close_arr[ref_bar + 1 : entry_idx]
-    if len(window) == 0:
-        # Immediate BULL->BULL (shouldn't happen with dwell, but guard it)
-        return 0.0
+            window    = close_arr[ref_bar + 1 : entry_idx]
+            if len(window) == 0 or ref_price <= 0:
+                trough = 0.0
+            else:
+                min_close = float(np.min(window))
+                trough    = round((min_close / ref_price - 1.0) * 100, 2)
 
-    min_close = float(np.min(window))
-    trough    = (min_close / ref_price) - 1.0
-    return round(trough * 100, 2)
+            if debug:
+                print(
+                    f"  [trough] entry_idx={entry_idx} "
+                    f"ref_bar={ref_bar} block_len={block_len} "
+                    f"ref_price={ref_price:.2f} "
+                    f"trough={trough:.1f}%"
+                )
+            return trough
+        # else: block too short -- keep walking back
+
+    # No qualifying peak block found anywhere in history
+    if debug:
+        print(f"  [trough] entry_idx={entry_idx}: no qualifying peak block found -> 0.0")
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +171,7 @@ def run_backtest(
     h1_df: pd.DataFrame,
     sup,
     stop_loss: float = 0.15,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """
     Walk h1_df bar by bar.
@@ -148,6 +182,12 @@ def run_backtest(
     close_arr  = h1_df["close"].values
     ts_arr     = h1_df["ts"].values
     n          = len(regime_arr)
+
+    assert len(regime_arr) == len(close_arr), (
+        f"Alignment error: regime_arr len={len(regime_arr)} "
+        f"close_arr len={len(close_arr)}. Ensure h1_df and "
+        f"sup._h1_r5_series are built from the same sorted dataframe."
+    )
 
     trades: List[dict] = []
 
@@ -169,8 +209,17 @@ def run_backtest(
             in_trade         = True
             entry_bar        = i
             entry_price      = close
-            cycle_trough     = _cycle_trough_pct(regime_arr, close_arr, i)
+            cycle_trough     = _cycle_trough_pct(
+                regime_arr, close_arr, i, debug=debug
+            )
             peak_since_entry = close
+
+            if debug:
+                print(
+                    f"  [entry] bar={i} ts={ts} "
+                    f"price={close:.2f} trough={cycle_trough:.1f}% "
+                    f"class={classify_bull_depth(cycle_trough)}"
+                )
 
         # ---- while in trade: check exits ----
         if in_trade:
@@ -300,7 +349,11 @@ def main():
     ap.add_argument("--symbol",    default="ETH/USD")
     ap.add_argument("--stop-loss", type=float, default=0.15)
     ap.add_argument("--min-dwell", type=int,   default=None)
+    ap.add_argument("--min-peak-bars", type=int, default=MIN_PEAK_BARS,
+                    help="Min contiguous BULL/RANGE bars to qualify as a real peak (default 12)")
     ap.add_argument("--out",       default=".")
+    ap.add_argument("--debug",     action="store_true",
+                    help="Print ref_bar details for every trade entry")
     args = ap.parse_args()
 
     try:
@@ -333,15 +386,26 @@ def main():
 
         h_ref = df1h.copy().sort_values("ts").reset_index(drop=True)
 
-        print(f"Running backtest (stop_loss={args.stop_loss*100:.0f}%) ...")
-        trades_df = run_backtest(h_ref, sup, stop_loss=args.stop_loss)
+        # Override the module-level MIN_PEAK_BARS for this run
+        import eth_macrosupervisor_v30_backtest as _self
+        _self.MIN_PEAK_BARS = args.min_peak_bars
+
+        print(f"Running backtest (stop_loss={args.stop_loss*100:.0f}%, "
+              f"min_peak_bars={args.min_peak_bars}) ...")
+        trades_df = run_backtest(
+            h_ref, sup,
+            stop_loss=args.stop_loss,
+            debug=args.debug,
+        )
 
     if not trades_df.empty:
         print(f"  Trough distribution:")
         print(f"    DEEP    (<=-30%): {(trades_df.cycle_trough_pct <= -30).sum()}")
-        print(f"    MID  (-30%,-15%]: {((trades_df.cycle_trough_pct > -30) & (trades_df.cycle_trough_pct <= -15)).sum()}")
+        print(f"    MID  (-30%,-15%]: "
+              f"{((trades_df.cycle_trough_pct > -30) & (trades_df.cycle_trough_pct <= -15)).sum()}")
         print(f"    SHALLOW  (>-15%): {(trades_df.cycle_trough_pct > -15).sum()}")
-        print(f"    trough range: {trades_df.cycle_trough_pct.min():.1f}% to {trades_df.cycle_trough_pct.max():.1f}%")
+        print(f"    trough range: {trades_df.cycle_trough_pct.min():.1f}% "
+              f"to {trades_df.cycle_trough_pct.max():.1f}%")
         print()
 
     summary_df = build_summary(trades_df)
