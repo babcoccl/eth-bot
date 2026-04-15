@@ -9,19 +9,20 @@ Strategy
   ENTER : first h1 bar of each BULL segment
   EXIT  : first CRASH signal OR hard stop from entry-peak (default -15%)
 
-BULL class is determined by the CYCLE TROUGH -- the actual price drop
-from the last pre-crash BULL/RANGE peak to the minimum close reached
-during the CRASH/CORRECTION/RECOVERY segment, computed from raw price.
+BULL depth class is determined by CYCLE TROUGH -- the actual percentage
+drop from the last pre-crash peak (last BULL/RANGE bar before this BULL
+entry) to the minimum close between that bar and this entry bar.
 
-This is independent of the rolling-peak drawdown series used internally
-by the regime classifier (which resets on every ATH and reads near-zero
-at BULL entry bars).
+This correctly handles:
+  - Long multi-month crashes with embedded RANGE/CORRECTION sub-segments
+  - RANGE->BULL direct transitions (no crash between them)
+  - First-bar-of-history edge cases
 
-BULL class definitions (based on cycle_trough_pct)
-----------------------------------------------------
+BULL class definitions
+----------------------
   DEEP    : cycle_trough_pct <= -30%
   MID     : cycle_trough_pct in (-30%, -15%]
-  SHALLOW : cycle_trough_pct >  -15%
+  SHALLOW : cycle_trough_pct >  -15%  (or no preceding crash found)
 
 Outputs
 -------
@@ -70,7 +71,8 @@ class _TempDB:
 DEEP_THRESHOLD    = -0.30   # cycle trough <= -30% -> DEEP
 SHALLOW_THRESHOLD = -0.15   # cycle trough >  -15% -> SHALLOW
 
-PAUSE_REGIMES = {"CRASH", "CORRECTION", "RECOVERY"}
+PAUSE_REGIMES     = {"CRASH", "CORRECTION", "RECOVERY"}
+PEAK_REGIMES      = {"BULL", "RANGE"}       # regimes that represent price strength
 
 
 def classify_bull_depth(cycle_trough_pct: float) -> str:
@@ -84,58 +86,43 @@ def classify_bull_depth(cycle_trough_pct: float) -> str:
 
 def _cycle_trough_pct(regime_arr, close_arr, entry_idx: int) -> float:
     """
-    Compute the true cycle trough as the percentage drop from the last
-    pre-pause close to the minimum close during the preceding
-    CRASH/CORRECTION/RECOVERY block.
+    Compute the true cycle trough preceding a BULL entry.
 
     Algorithm
     ---------
-    1. Walk backwards from entry_idx-1 through consecutive PAUSE bars.
-    2. Record the bar index where the pause block started (first bar
-       after the previous BULL/RANGE segment).
-    3. Trough = (min_close_in_pause / close_at_cycle_start) - 1
+    1. Walk backwards from entry_idx-1 to find the most recent bar
+       where the regime was BULL or RANGE (a "peak regime" bar).
+       This is the reference point regardless of what came between
+       (handles embedded RANGE bars within long crashes).
 
-    Returns 0.0 if no preceding pause block is found (e.g. first bar).
+    2. ref_price = close at that bar.
+
+    3. trough = (min(close[ref_bar+1 : entry_idx]) / ref_price) - 1
+
+    Returns 0.0 if no prior BULL/RANGE bar exists (start of history).
     """
-    # Step 1: find the extent of the preceding pause block
-    j = entry_idx - 1
-    pause_start = -1
-    while j >= 0:
-        r = str(regime_arr[j])
-        if r in PAUSE_REGIMES:
-            pause_start = j
-            j -= 1
-        else:
-            break  # hit a non-pause regime (BULL or RANGE)
+    # Step 1: find the most recent prior BULL or RANGE bar
+    ref_bar = -1
+    for j in range(entry_idx - 1, -1, -1):
+        if str(regime_arr[j]) in PEAK_REGIMES:
+            ref_bar = j
+            break
 
-    if pause_start == -1:
-        # No pause block immediately before this BULL entry
-        # (e.g. RANGE->BULL direct without any crash in between)
-        # Look back up to 30 bars for any pause
-        start = max(0, entry_idx - 30)
-        for k in range(start, entry_idx):
-            if str(regime_arr[k]) in PAUSE_REGIMES:
-                pause_start = k
-                break
-        if pause_start == -1:
-            return 0.0
+    if ref_bar == -1:
+        # No prior peak regime found -- start of history, treat as SHALLOW
+        return 0.0
 
-    # Step 2: reference price = close of bar just before pause started
-    ref_bar = pause_start - 1
-    if ref_bar < 0:
-        ref_price = float(close_arr[0])
-    else:
-        ref_price = float(close_arr[ref_bar])
-
+    ref_price = float(close_arr[ref_bar])
     if ref_price <= 0:
         return 0.0
 
-    # Step 3: minimum close during the entire pause block
-    pause_closes = close_arr[pause_start:entry_idx]
-    if len(pause_closes) == 0:
+    # Step 2: min close between ref_bar (exclusive) and entry_idx (exclusive)
+    window = close_arr[ref_bar + 1 : entry_idx]
+    if len(window) == 0:
+        # Immediate BULL->BULL (shouldn't happen with dwell, but guard it)
         return 0.0
 
-    min_close = float(np.min(pause_closes))
+    min_close = float(np.min(window))
     trough    = (min_close / ref_price) - 1.0
     return round(trough * 100, 2)
 
@@ -155,7 +142,7 @@ def run_backtest(
     """
     Walk h1_df bar by bar.
     Entry  : first bar of each new BULL segment.
-    Exit   : first CRASH signal, hard stop, or end of data.
+    Exit   : first CRASH signal, hard stop from peak, or end of data.
     """
     regime_arr = sup._h1_r5_series.values
     close_arr  = h1_df["close"].values
@@ -182,11 +169,10 @@ def run_backtest(
             in_trade         = True
             entry_bar        = i
             entry_price      = close
-            # Compute true cycle trough from raw price
             cycle_trough     = _cycle_trough_pct(regime_arr, close_arr, i)
             peak_since_entry = close
 
-        # ---- while in trade: track peak and check exits ----
+        # ---- while in trade: check exits ----
         if in_trade:
             peak_since_entry = max(peak_since_entry, close)
             dd_from_peak     = (close - peak_since_entry) / peak_since_entry
@@ -207,18 +193,18 @@ def run_backtest(
                 bull_class = classify_bull_depth(cycle_trough)
 
                 trades.append({
-                    "entry_ts":           str(ts_arr[entry_bar]),
-                    "exit_ts":            str(ts),
-                    "entry_price":        round(entry_price, 2),
-                    "exit_price":         round(close, 2),
-                    "bars_held":          bars_held,
-                    "days_held":          round(bars_held / 24, 2),
-                    "cycle_trough_pct":   cycle_trough,
-                    "bull_class":         bull_class,
-                    "gross_return_pct":   round(gross_ret * 100, 2),
-                    "net_return_pct":     round(net_ret * 100, 2),
-                    "win":                int(net_ret > 0),
-                    "exit_reason":        exit_reason,
+                    "entry_ts":             str(ts_arr[entry_bar]),
+                    "exit_ts":              str(ts),
+                    "entry_price":          round(entry_price, 2),
+                    "exit_price":           round(close, 2),
+                    "bars_held":            bars_held,
+                    "days_held":            round(bars_held / 24, 2),
+                    "cycle_trough_pct":     cycle_trough,
+                    "bull_class":           bull_class,
+                    "gross_return_pct":     round(gross_ret * 100, 2),
+                    "net_return_pct":       round(net_ret * 100, 2),
+                    "win":                  int(net_ret > 0),
+                    "exit_reason":          exit_reason,
                     "max_dd_from_peak_pct": round(dd_from_peak * 100, 2),
                 })
 
@@ -252,20 +238,20 @@ def build_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
         wins = grp["win"].sum()
         n    = len(grp)
         records.append({
-            "bull_class":              label,
-            "trades":                  n,
-            "wins":                    int(wins),
-            "win_rate_pct":            round(wins / n * 100, 1) if n > 0 else 0,
-            "mean_net_ret_pct":        round(grp["net_return_pct"].mean(), 2),
-            "median_net_ret_pct":      round(grp["net_return_pct"].median(), 2),
-            "total_net_ret_pct":       round(grp["net_return_pct"].sum(), 2),
-            "mean_days_held":          round(grp["days_held"].mean(), 2),
-            "median_days_held":        round(grp["days_held"].median(), 2),
-            "mean_cycle_trough_pct":   round(grp["cycle_trough_pct"].mean(), 2),
-            "best_trade_pct":          round(grp["net_return_pct"].max(), 2),
-            "worst_trade_pct":         round(grp["net_return_pct"].min(), 2),
-            "stop_loss_exits":         int((grp["exit_reason"].str.startswith("stop_loss")).sum()),
-            "crash_signal_exits":      int((grp["exit_reason"] == "crash_signal").sum()),
+            "bull_class":            label,
+            "trades":                n,
+            "wins":                  int(wins),
+            "win_rate_pct":          round(wins / n * 100, 1) if n > 0 else 0,
+            "mean_net_ret_pct":      round(grp["net_return_pct"].mean(), 2),
+            "median_net_ret_pct":    round(grp["net_return_pct"].median(), 2),
+            "total_net_ret_pct":     round(grp["net_return_pct"].sum(), 2),
+            "mean_days_held":        round(grp["days_held"].mean(), 2),
+            "median_days_held":      round(grp["days_held"].median(), 2),
+            "mean_cycle_trough_pct": round(grp["cycle_trough_pct"].mean(), 2),
+            "best_trade_pct":        round(grp["net_return_pct"].max(), 2),
+            "worst_trade_pct":       round(grp["net_return_pct"].min(), 2),
+            "stop_loss_exits":       int((grp["exit_reason"].str.startswith("stop_loss")).sum()),
+            "crash_signal_exits":    int((grp["exit_reason"] == "crash_signal").sum()),
         })
 
     return pd.DataFrame(records)
@@ -283,7 +269,7 @@ def print_report(trades_df: pd.DataFrame, summary_df: pd.DataFrame) -> None:
     print(f"  {'bull_class':<10} {'trades':>6} {'win%':>6} "
           f"{'mean%':>7} {'med%':>7} {'total%':>8} "
           f"{'med_days':>9} {'trough%':>8}")
-    print("  " + "-" * 64)
+    print("  " + "-" * 66)
     for _, row in summary_df.iterrows():
         print(f"  {row['bull_class']:<10} "
               f"{int(row['trades']):>6} "
@@ -293,10 +279,11 @@ def print_report(trades_df: pd.DataFrame, summary_df: pd.DataFrame) -> None:
               f"{row['total_net_ret_pct']:>+8.1f}% "
               f"{row['median_days_held']:>9.1f} "
               f"{row['mean_cycle_trough_pct']:>+8.1f}%")
-    print(f"\n  stops={int(summary_df.loc[0,'stop_loss_exits'])}  "
-          f"crash_exits={int(summary_df.loc[0,'crash_signal_exits'])}  "
-          f"best={summary_df.loc[0,'best_trade_pct']:+.1f}%  "
-          f"worst={summary_df.loc[0,'worst_trade_pct']:+.1f}%")
+    r0 = summary_df.iloc[0]
+    print(f"\n  stops={int(r0.stop_loss_exits)}  "
+          f"crash_exits={int(r0.crash_signal_exits)}  "
+          f"best={r0.best_trade_pct:+.1f}%  "
+          f"worst={r0.worst_trade_pct:+.1f}%")
     print()
 
 
@@ -344,18 +331,16 @@ def main():
         sup = MacroSupervisor(db_path=db_path, **kwargs)
         sup.apply_to_df(df5.iloc[:1].copy(), df1h.copy())
 
-        # Build h1 frame aligned to the supervisor's regime series
         h_ref = df1h.copy().sort_values("ts").reset_index(drop=True)
 
         print(f"Running backtest (stop_loss={args.stop_loss*100:.0f}%) ...")
         trades_df = run_backtest(h_ref, sup, stop_loss=args.stop_loss)
 
-    # Quick sanity check: print trough distribution
     if not trades_df.empty:
         print(f"  Trough distribution:")
         print(f"    DEEP    (<=-30%): {(trades_df.cycle_trough_pct <= -30).sum()}")
         print(f"    MID  (-30%,-15%]: {((trades_df.cycle_trough_pct > -30) & (trades_df.cycle_trough_pct <= -15)).sum()}")
-        print(f"    SHALLOW (>-15%):  {(trades_df.cycle_trough_pct > -15).sum()}")
+        print(f"    SHALLOW  (>-15%): {(trades_df.cycle_trough_pct > -15).sum()}")
         print(f"    trough range: {trades_df.cycle_trough_pct.min():.1f}% to {trades_df.cycle_trough_pct.max():.1f}%")
         print()
 
@@ -368,8 +353,7 @@ def main():
     summary_df.to_csv(p_summary, index=False)
 
     print_report(trades_df, summary_df)
-    out_abs = os.path.abspath(args.out)
-    print(f"  Outputs: {out_abs}/")
+    print(f"  Outputs: {os.path.abspath(args.out)}/")
     print(f"    eth_backtest_v30_trades.csv   ({len(trades_df)} trades)")
     print(f"    eth_backtest_v30_summary.csv  ({len(summary_df)} rows)")
     print()
