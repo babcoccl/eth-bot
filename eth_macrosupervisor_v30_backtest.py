@@ -13,9 +13,9 @@ BULL depth class is determined by CYCLE TROUGH -- the actual percentage
 drop from the last SUBSTANTIAL pre-crash peak to the minimum close
 between that peak and this BULL entry.
 
-"Substantial" means a contiguous BULL/RANGE block of >= MIN_PEAK_BARS bars.
-This filters out brief RANGE blips that the regime classifier emits during
-bear-market consolidation, which would otherwise produce near-zero troughs.
+"Substantial" means a contiguous BULL/RANGE block of >= MIN_PEAK_BARS bars
+(default 48 = 2 days on 1h data). This filters out brief RANGE blips that
+the regime classifier emits during bear-market consolidation.
 
 BULL class definitions
 ----------------------
@@ -23,9 +23,18 @@ BULL class definitions
   MID     : cycle_trough_pct in (-30%, -15%]
   SHALLOW : cycle_trough_pct >  -15%  (or no qualifying peak found)
 
+Per-class stop-loss (--stop-loss-by-class)
+------------------------------------------
+When --stop-loss-by-class is set, each trade uses a class-specific hard stop
+instead of the flat --stop-loss value:
+  DEEP    : -20%  (large recovery swings; wider noise tolerance)
+  MID     : -12%  (historically 0% win rate; cut losses fast)
+  SHALLOW : -10%  (momentum trades; small drawdowns expected)
+The flat --stop-loss value is used as the fallback if the class is unknown.
+
 Outputs
 -------
-  eth_backtest_v30_trades.csv   -- one row per trade
+  eth_backtest_v30_trades.csv   -- one row per trade (includes stop_loss_used)
   eth_backtest_v30_summary.csv  -- aggregate stats by BULL class
 
 Usage
@@ -33,6 +42,7 @@ Usage
   python eth_macrosupervisor_v30_backtest.py
   python eth_macrosupervisor_v30_backtest.py --start 2021-01-01 --end 2026-04-15
   python eth_macrosupervisor_v30_backtest.py --stop-loss 0.12
+  python eth_macrosupervisor_v30_backtest.py --stop-loss-by-class
   python eth_macrosupervisor_v30_backtest.py --out ./backtest_out/
   python eth_macrosupervisor_v30_backtest.py --debug
 """
@@ -40,7 +50,7 @@ Usage
 from __future__ import annotations
 import argparse, os, sys, tempfile
 from datetime import datetime, timezone, timedelta
-from typing import List
+from typing import List, Optional, Dict
 
 import numpy as np
 import pandas as pd
@@ -71,13 +81,21 @@ class _TempDB:
 DEEP_THRESHOLD    = -0.30   # cycle trough <= -30% -> DEEP
 SHALLOW_THRESHOLD = -0.15   # cycle trough >  -15% -> SHALLOW
 
-PAUSE_REGIMES  = {"CRASH", "CORRECTION", "RECOVERY"}
-PEAK_REGIMES   = {"BULL", "RANGE"}
+PAUSE_REGIMES = {"CRASH", "CORRECTION", "RECOVERY"}
+PEAK_REGIMES  = {"BULL", "RANGE"}
 
 # Minimum contiguous BULL/RANGE bars to qualify as a real peak segment.
-# Filters out brief RANGE blips emitted during bear-market consolidation.
-# 12 bars = 12 hours; tune up if still getting noise.
+# 48 bars = 2 days on 1h data. Filters out brief RANGE blips.
 MIN_PEAK_BARS = 48
+
+# Per-class stop-loss used when --stop-loss-by-class is enabled.
+# Derived from backtest analysis: DEEP entries have wider swings,
+# MID has 0% win rate so cut fast, SHALLOW are tight momentum trades.
+STOP_LOSS_BY_CLASS: Dict[str, float] = {
+    "DEEP":    0.20,   # -20%
+    "MID":     0.12,   # -12%
+    "SHALLOW": 0.10,   # -10%
+}
 
 
 def classify_bull_depth(cycle_trough_pct: float) -> str:
@@ -128,7 +146,6 @@ def _cycle_trough_pct(
             trough_window = close_arr[block_end + 1 : entry_idx]   # gap only
 
             if len(trough_window) == 0 or ref_price <= 0:
-                # Direct transition, no crash between this block and entry
                 trough = 0.0
             else:
                 trough = round((float(np.min(trough_window)) / ref_price - 1.0) * 100, 2)
@@ -146,6 +163,7 @@ def _cycle_trough_pct(
         print(f"  [trough] entry_idx={entry_idx}: no qualifying peak block -> 0.0")
     return 0.0
 
+
 # ---------------------------------------------------------------------------
 # Core backtest engine
 # ---------------------------------------------------------------------------
@@ -157,12 +175,17 @@ def run_backtest(
     h1_df: pd.DataFrame,
     sup,
     stop_loss: float = 0.15,
+    stop_loss_by_class: Optional[Dict[str, float]] = None,
     debug: bool = False,
 ) -> pd.DataFrame:
     """
     Walk h1_df bar by bar.
     Entry  : first bar of each new BULL segment.
     Exit   : first CRASH signal, hard stop from peak, or end of data.
+
+    stop_loss_by_class : if provided, each trade uses the class-specific stop
+                         (DEEP/MID/SHALLOW keys). Falls back to stop_loss if
+                         the class key is missing.
     """
     regime_arr = sup._h1_r5_series.values
     close_arr  = h1_df["close"].values
@@ -177,11 +200,12 @@ def run_backtest(
 
     trades: List[dict] = []
 
-    in_trade         = False
-    entry_bar        = None
-    entry_price      = None
-    cycle_trough     = None
-    peak_since_entry = None
+    in_trade          = False
+    entry_bar         = None
+    entry_price       = None
+    cycle_trough      = None
+    peak_since_entry  = None
+    active_stop_loss  = stop_loss   # resolved per-trade when class is known
 
     prev_regime = str(regime_arr[0])
 
@@ -200,11 +224,19 @@ def run_backtest(
             )
             peak_since_entry = close
 
+            # Resolve stop-loss for this trade
+            bull_class_now = classify_bull_depth(cycle_trough)
+            if stop_loss_by_class is not None:
+                active_stop_loss = stop_loss_by_class.get(bull_class_now, stop_loss)
+            else:
+                active_stop_loss = stop_loss
+
             if debug:
                 print(
                     f"  [entry] bar={i} ts={ts} "
                     f"price={close:.2f} trough={cycle_trough:.1f}% "
-                    f"class={classify_bull_depth(cycle_trough)}"
+                    f"class={bull_class_now} "
+                    f"stop={active_stop_loss*100:.0f}%"
                 )
 
         # ---- while in trade: check exits ----
@@ -214,8 +246,8 @@ def run_backtest(
 
             exit_reason = None
 
-            if dd_from_peak <= -stop_loss:
-                exit_reason = f"stop_loss_{stop_loss*100:.0f}pct"
+            if dd_from_peak <= -active_stop_loss:
+                exit_reason = f"stop_loss_{active_stop_loss*100:.0f}pct"
             elif cur_regime == "CRASH" and prev_regime != "CRASH":
                 exit_reason = "crash_signal"
             elif i == n - 1:
@@ -236,6 +268,7 @@ def run_backtest(
                     "days_held":            round(bars_held / 24, 2),
                     "cycle_trough_pct":     cycle_trough,
                     "bull_class":           bull_class,
+                    "stop_loss_used":       round(active_stop_loss * 100, 1),
                     "gross_return_pct":     round(gross_ret * 100, 2),
                     "net_return_pct":       round(net_ret * 100, 2),
                     "win":                  int(net_ret > 0),
@@ -248,6 +281,7 @@ def run_backtest(
                 entry_price      = None
                 cycle_trough     = None
                 peak_since_entry = None
+                active_stop_loss = stop_loss
 
         prev_regime = cur_regime
 
@@ -283,6 +317,7 @@ def build_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
             "mean_days_held":        round(grp["days_held"].mean(), 2),
             "median_days_held":      round(grp["days_held"].median(), 2),
             "mean_cycle_trough_pct": round(grp["cycle_trough_pct"].mean(), 2),
+            "mean_stop_loss_used":   round(grp["stop_loss_used"].mean(), 1) if "stop_loss_used" in grp.columns else None,
             "best_trade_pct":        round(grp["net_return_pct"].max(), 2),
             "worst_trade_pct":       round(grp["net_return_pct"].min(), 2),
             "stop_loss_exits":       int((grp["exit_reason"].str.startswith("stop_loss")).sum()),
@@ -303,9 +338,10 @@ def print_report(trades_df: pd.DataFrame, summary_df: pd.DataFrame) -> None:
     print(SEP)
     print(f"  {'bull_class':<10} {'trades':>6} {'win%':>6} "
           f"{'mean%':>7} {'med%':>7} {'total%':>8} "
-          f"{'med_days':>9} {'trough%':>8}")
-    print("  " + "-" * 66)
+          f"{'med_days':>9} {'trough%':>8} {'stop%':>6}")
+    print("  " + "-" * 70)
     for _, row in summary_df.iterrows():
+        stop_str = f"{row['mean_stop_loss_used']:>5.0f}%" if row.get('mean_stop_loss_used') is not None else "  n/a"
         print(f"  {row['bull_class']:<10} "
               f"{int(row['trades']):>6} "
               f"{row['win_rate_pct']:>5.0f}% "
@@ -313,7 +349,8 @@ def print_report(trades_df: pd.DataFrame, summary_df: pd.DataFrame) -> None:
               f"{row['median_net_ret_pct']:>+7.1f}% "
               f"{row['total_net_ret_pct']:>+8.1f}% "
               f"{row['median_days_held']:>9.1f} "
-              f"{row['mean_cycle_trough_pct']:>+8.1f}%")
+              f"{row['mean_cycle_trough_pct']:>+8.1f}% "
+              f"{stop_str}")
     r0 = summary_df.iloc[0]
     print(f"\n  stops={int(r0.stop_loss_exits)}  "
           f"crash_exits={int(r0.crash_signal_exits)}  "
@@ -333,13 +370,20 @@ def main():
     ap.add_argument("--start",     default="2021-01-01")
     ap.add_argument("--end",       default=None)
     ap.add_argument("--symbol",    default="ETH/USD")
-    ap.add_argument("--stop-loss", type=float, default=0.15)
+    ap.add_argument("--stop-loss", type=float, default=0.15,
+                    help="Flat hard stop from entry-peak (default 0.15 = 15%%). "
+                         "Used as fallback when --stop-loss-by-class is set.")
+    ap.add_argument("--stop-loss-by-class", action="store_true",
+                    help="Use per-class stop-loss: DEEP=-20%%, MID=-12%%, SHALLOW=-10%%. "
+                         "Overrides --stop-loss per trade based on bull_class. "
+                         "--stop-loss is still used as the fallback for unknown classes.")
     ap.add_argument("--min-dwell", type=int,   default=None)
     ap.add_argument("--min-peak-bars", type=int, default=MIN_PEAK_BARS,
-                    help="Min contiguous BULL/RANGE bars to qualify as a real peak (default 12)")
+                    help="Min contiguous BULL/RANGE bars to qualify as a real peak "
+                         "(default 48 = 2 days on 1h data)")
     ap.add_argument("--out",       default=".")
     ap.add_argument("--debug",     action="store_true",
-                    help="Print ref_bar details for every trade entry")
+                    help="Print trough block details and stop-loss for every entry")
     args = ap.parse_args()
 
     try:
@@ -361,6 +405,15 @@ def main():
     df5  = fetch_ohlcv(args.symbol, "5m", start_dt, end_dt)
     print(f"  1h bars: {len(df1h):,}   5m bars: {len(df5):,}")
 
+    stop_loss_by_class = STOP_LOSS_BY_CLASS if args.stop_loss_by_class else None
+    if args.stop_loss_by_class:
+        print(f"  stop-loss mode: per-class "
+              f"(DEEP={STOP_LOSS_BY_CLASS['DEEP']*100:.0f}%, "
+              f"MID={STOP_LOSS_BY_CLASS['MID']*100:.0f}%, "
+              f"SHALLOW={STOP_LOSS_BY_CLASS['SHALLOW']*100:.0f}%)")
+    else:
+        print(f"  stop-loss mode: flat {args.stop_loss*100:.0f}%")
+
     kwargs = {}
     if args.min_dwell is not None:
         kwargs["regime5_min_dwell_bars"] = args.min_dwell
@@ -372,7 +425,6 @@ def main():
 
         h_ref = df1h.copy().sort_values("ts").reset_index(drop=True)
 
-        # Override the module-level MIN_PEAK_BARS for this run
         import eth_macrosupervisor_v30_backtest as _self
         _self.MIN_PEAK_BARS = args.min_peak_bars
 
@@ -381,6 +433,7 @@ def main():
         trades_df = run_backtest(
             h_ref, sup,
             stop_loss=args.stop_loss,
+            stop_loss_by_class=stop_loss_by_class,
             debug=args.debug,
         )
 
