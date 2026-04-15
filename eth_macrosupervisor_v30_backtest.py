@@ -133,15 +133,17 @@ def _cycle_trough_pct(
         block_len   = block_end - block_start + 1
 
         if block_len >= min_peak_bars:
-            # This is a qualifying peak segment; use its last bar
-            ref_bar   = block_end
-            ref_price = float(close_arr[ref_bar])
+            # ref_price = peak of the block (highest close)
+            block_closes  = close_arr[block_start : block_end + 1]
+            ref_price     = float(np.max(block_closes))
 
-            window    = close_arr[ref_bar + 1 : entry_idx]
-            if len(window) == 0 or ref_price <= 0:
+            # Window from block_start to entry -- always non-empty,
+            # even when block_end == entry_idx - 1
+            trough_window = close_arr[block_start : entry_idx]
+            if len(trough_window) == 0 or ref_price <= 0:
                 trough = 0.0
             else:
-                min_close = float(np.min(window))
+                min_close = float(np.min(trough_window))
                 trough    = round((min_close / ref_price - 1.0) * 100, 2)
 
             if debug:
