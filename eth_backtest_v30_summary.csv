@@ -1,5 +1,5 @@
 bull_class,trades,wins,win_rate_pct,mean_net_ret_pct,median_net_ret_pct,total_net_ret_pct,mean_days_held,median_days_held,mean_cycle_trough_pct,best_trade_pct,worst_trade_pct,stop_loss_exits,crash_signal_exits
-ALL,21,10,47.6,5.98,-0.81,125.54,15.51,14.25,-6.75,45.92,-13.59,1,19
+ALL,21,10,47.6,5.95,-1.31,125.04,15.51,14.25,-6.58,45.92,-13.59,1,19
 DEEP,1,1,100.0,7.68,7.68,7.68,15.0,15.0,-49.42,7.68,7.68,0,1
 MID,2,1,50.0,4.48,4.48,8.95,20.06,20.06,-26.65,12.71,-3.76,0,2
-SHALLOW,18,8,44.4,6.05,-1.56,108.91,15.03,14.23,-2.17,45.92,-13.59,1,16
+SHALLOW,18,8,44.4,6.02,-1.8,108.41,15.03,14.23,-1.97,45.92,-13.59,1,16
