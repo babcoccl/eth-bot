@@ -1,0 +1,3 @@
+bull_class,trades,wins,win_rate_pct,mean_net_ret_pct,median_net_ret_pct,total_net_ret_pct,mean_days_held,median_days_held,mean_dd_at_entry,best_trade_pct,worst_trade_pct,stop_loss_exits,crash_signal_exits
+ALL,21,10,47.6,5.95,-1.41,124.94,15.5,14.25,-2.53,45.92,-13.59,1,19
+SHALLOW,21,10,47.6,5.95,-1.41,124.94,15.5,14.25,-2.53,45.92,-13.59,1,19
