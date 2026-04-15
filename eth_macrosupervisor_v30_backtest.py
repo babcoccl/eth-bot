@@ -77,7 +77,7 @@ PEAK_REGIMES   = {"BULL", "RANGE"}
 # Minimum contiguous BULL/RANGE bars to qualify as a real peak segment.
 # Filters out brief RANGE blips emitted during bear-market consolidation.
 # 12 bars = 12 hours; tune up if still getting noise.
-MIN_PEAK_BARS = 12
+MIN_PEAK_BARS = 48
 
 
 def classify_bull_depth(cycle_trough_pct: float) -> str:
@@ -97,35 +97,26 @@ def _cycle_trough_pct(
     debug: bool = False,
 ) -> float:
     """
-    Compute the true cycle trough preceding a BULL entry.
+    Walk backwards to find the last CONTIGUOUS BULL/RANGE block with
+    length >= min_peak_bars (default 48 = 2 days).
 
-    Algorithm
-    ---------
-    Walk backwards from entry_idx-1 to find the last CONTIGUOUS block of
-    BULL/RANGE bars with length >= min_peak_bars.  Use the LAST bar of that
-    block (closest to the crash) as the reference price.
+      ref_price     = max(close[block_start : block_end+1])   # peak of block
+      trough_window = close[block_end+1   : entry_idx]        # gap after block
 
-    trough = (min(close[ref_bar+1 : entry_idx]) / close[ref_bar]) - 1
-
-    This correctly handles:
-      - Brief RANGE blips within bear markets (ignored -- too short)
-      - Long multi-month crashes with embedded noise segments
-      - RANGE->BULL direct transitions (window will be short; trough ~0)
-
-    Returns 0.0 (SHALLOW) if no qualifying peak block is found.
+    If trough_window is empty (block ends at entry-1), this is a direct
+    RANGE->BULL transition with no crash in between -> trough = 0.0 (SHALLOW).
+    Short blip blocks are skipped because MIN_PEAK_BARS=48 filters them out.
     """
     j = entry_idx - 1
 
     while j >= 0:
-        # Skip non-peak bars (CRASH / CORRECTION / RECOVERY)
+        # Skip non-peak bars
         while j >= 0 and str(regime_arr[j]) not in PEAK_REGIMES:
             j -= 1
-
         if j < 0:
             break
 
-        # Found a peak-regime bar at j.  Measure how long this
-        # contiguous block extends backwards.
+        # Measure contiguous block
         block_end = j
         while j >= 0 and str(regime_arr[j]) in PEAK_REGIMES:
             j -= 1
@@ -133,34 +124,27 @@ def _cycle_trough_pct(
         block_len   = block_end - block_start + 1
 
         if block_len >= min_peak_bars:
-            # ref_price = peak of the block (highest close)
-            block_closes  = close_arr[block_start : block_end + 1]
-            ref_price     = float(np.max(block_closes))
+            ref_price     = float(np.max(close_arr[block_start : block_end + 1]))
+            trough_window = close_arr[block_end + 1 : entry_idx]   # gap only
 
-            # Window from block_start to entry -- always non-empty,
-            # even when block_end == entry_idx - 1
-            trough_window = close_arr[block_start : entry_idx]
             if len(trough_window) == 0 or ref_price <= 0:
+                # Direct transition, no crash between this block and entry
                 trough = 0.0
             else:
-                min_close = float(np.min(trough_window))
-                trough    = round((min_close / ref_price - 1.0) * 100, 2)
+                trough = round((float(np.min(trough_window)) / ref_price - 1.0) * 100, 2)
 
             if debug:
                 print(
                     f"  [trough] entry_idx={entry_idx} "
-                    f"ref_bar={ref_bar} block_len={block_len} "
+                    f"block=[{block_start},{block_end}] block_len={block_len} "
                     f"ref_price={ref_price:.2f} "
                     f"trough={trough:.1f}%"
                 )
             return trough
-        # else: block too short -- keep walking back
 
-    # No qualifying peak block found anywhere in history
     if debug:
-        print(f"  [trough] entry_idx={entry_idx}: no qualifying peak block found -> 0.0")
+        print(f"  [trough] entry_idx={entry_idx}: no qualifying peak block -> 0.0")
     return 0.0
-
 
 # ---------------------------------------------------------------------------
 # Core backtest engine
