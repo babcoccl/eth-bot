@@ -23,14 +23,13 @@ BULL class definitions
   MID     : cycle_trough_pct in (-30%, -15%]
   SHALLOW : cycle_trough_pct >  -15%  (or no qualifying peak found)
 
-Per-class stop-loss (--stop-loss-by-class)
-------------------------------------------
-When --stop-loss-by-class is set, each trade uses a class-specific hard stop
-instead of the flat --stop-loss value:
+Per-class stop-loss (default behavior)
+---------------------------------------
+By default, each trade uses a class-specific hard stop:
   DEEP    : -20%  (large recovery swings; wider noise tolerance)
-  MID     : -12%  (historically 0% win rate; cut losses fast)
-  SHALLOW : -15%  (reverted from -10%; tighter stop was cutting winners early)
-The flat --stop-loss value is used as the fallback if the class is unknown.
+  MID     : -15%
+  SHALLOW : -10%
+Pass --no-stop-loss-by-class to use a single flat stop (--stop-loss).
 
 History
 -------
@@ -38,6 +37,9 @@ History
   v30.2 : Raised SHALLOW stop from 10% -> 15% after backtest showed -37.3pp
            regression. SHALLOW trades need -10% to -14% drawdown room before
            recovering. Only 1 stop fired under flat 15%; 10 fired at 10%.
+  v30.3 : Made stop-loss-by-class the default. MID reset to 15%, SHALLOW=10%.
+           Signature: run_backtest(h1_df, sup, stop_loss=None,
+           stop_loss_by_class=True, debug=False)
 
 Outputs
 -------
@@ -48,8 +50,8 @@ Usage
 -----
   python eth_macrosupervisor_v30_backtest.py
   python eth_macrosupervisor_v30_backtest.py --start 2021-01-01 --end 2026-04-16
-  python eth_macrosupervisor_v30_backtest.py --stop-loss 0.12
-  python eth_macrosupervisor_v30_backtest.py --stop-loss-by-class
+  python eth_macrosupervisor_v30_backtest.py --stop-loss 0.12 --no-stop-loss-by-class
+  python eth_macrosupervisor_v30_backtest.py --no-stop-loss-by-class --stop-loss 0.15
   python eth_macrosupervisor_v30_backtest.py --out ./backtest_out/
   python eth_macrosupervisor_v30_backtest.py --debug
 """
@@ -95,14 +97,11 @@ PEAK_REGIMES  = {"BULL", "RANGE"}
 # 48 bars = 2 days on 1h data. Filters out brief RANGE blips.
 MIN_PEAK_BARS = 48
 
-# Per-class stop-loss used when --stop-loss-by-class is enabled.
-# DEEP  : wider stop -- large recovery swings need noise room
-# MID   : tighter stop -- 0% historical win rate, cut losses fast
-# SHALLOW: flat baseline -- backtest showed 10% was too tight, cut winners early
+# Per-class stop-loss — default behavior when stop_loss_by_class=True.
 STOP_LOSS_BY_CLASS: Dict[str, float] = {
-    "DEEP":    0.20,   # -20%
-    "MID":     0.12,   # -12%
-    "SHALLOW": 0.15,   # -15%  (raised from 0.10 in v30.2)
+    "DEEP":    0.20,   # 20% drawdown from peak
+    "MID":     0.15,   # 15%
+    "SHALLOW": 0.10,   # 10%
 }
 
 
@@ -182,8 +181,8 @@ FEE_RATE = 0.001   # 0.1% per side (Coinbase Advanced)
 def run_backtest(
     h1_df: pd.DataFrame,
     sup,
-    stop_loss: float = 0.15,
-    stop_loss_by_class: Optional[Dict[str, float]] = None,
+    stop_loss: Optional[float] = None,
+    stop_loss_by_class: bool = True,
     debug: bool = False,
 ) -> pd.DataFrame:
     """
@@ -191,9 +190,10 @@ def run_backtest(
     Entry  : first bar of each new BULL segment.
     Exit   : first CRASH signal, hard stop from peak, or end of data.
 
-    stop_loss_by_class : if provided, each trade uses the class-specific stop
-                         (DEEP/MID/SHALLOW keys). Falls back to stop_loss if
-                         the class key is missing.
+    stop_loss_by_class : if True (default), each trade uses the class-specific
+                         stop from STOP_LOSS_BY_CLASS (DEEP/MID/SHALLOW).
+                         If False, uses stop_loss (flat); defaults to 0.15 if
+                         stop_loss is None.
     """
     regime_arr = sup._h1_r5_series.values
     close_arr  = h1_df["close"].values
@@ -213,7 +213,7 @@ def run_backtest(
     entry_price       = None
     cycle_trough      = None
     peak_since_entry  = None
-    active_stop_loss  = stop_loss
+    active_stop_loss  = stop_loss if stop_loss is not None else 0.15
 
     prev_regime = str(regime_arr[0])
 
@@ -233,10 +233,12 @@ def run_backtest(
             peak_since_entry = close
 
             bull_class_now = classify_bull_depth(cycle_trough)
-            if stop_loss_by_class is not None:
-                active_stop_loss = stop_loss_by_class.get(bull_class_now, stop_loss)
+
+            # Determine stop threshold for this trade
+            if stop_loss_by_class:
+                active_stop_loss = STOP_LOSS_BY_CLASS[bull_class_now]
             else:
-                active_stop_loss = stop_loss
+                active_stop_loss = stop_loss if stop_loss is not None else 0.15
 
             if debug:
                 print(
@@ -288,7 +290,7 @@ def run_backtest(
                 entry_price      = None
                 cycle_trough     = None
                 peak_since_entry = None
-                active_stop_loss = stop_loss
+                active_stop_loss = stop_loss if stop_loss is not None else 0.15
 
         prev_regime = cur_regime
 
@@ -377,13 +379,11 @@ def main():
     ap.add_argument("--start",     default="2021-01-01")
     ap.add_argument("--end",       default=None)
     ap.add_argument("--symbol",    default="ETH/USD")
-    ap.add_argument("--stop-loss", type=float, default=0.15,
-                    help="Flat hard stop from entry-peak (default 0.15 = 15%%). "
-                         "Used as fallback when --stop-loss-by-class is set.")
-    ap.add_argument("--stop-loss-by-class", action="store_true",
-                    help="Use per-class stop-loss: DEEP=-20%%, MID=-12%%, SHALLOW=-15%%. "
-                         "Overrides --stop-loss per trade based on bull_class. "
-                         "--stop-loss is still used as the fallback for unknown classes.")
+    ap.add_argument("--stop-loss", type=float, default=None,
+                    help="Single flat stop-loss (overrides --stop-loss-by-class). "
+                         "e.g. 0.15 = 15%%. Only used when --no-stop-loss-by-class is set.")
+    ap.add_argument("--no-stop-loss-by-class", action="store_true",
+                    help="Disable per-class stop-loss; requires --stop-loss.")
     ap.add_argument("--min-dwell", type=int,   default=None)
     ap.add_argument("--min-peak-bars", type=int, default=MIN_PEAK_BARS,
                     help="Min contiguous BULL/RANGE bars to qualify as a real peak "
@@ -407,26 +407,28 @@ def main():
         + timedelta(days=1)
     )
 
+    stop_loss_by_class = not args.no_stop_loss_by_class
+
     print(f"Fetching data {args.start} -> {end_s} ...")
     df1h = fetch_ohlcv(args.symbol, "1h", start_dt, end_dt)
     df5  = fetch_ohlcv(args.symbol, "5m", start_dt, end_dt)
     print(f"  1h bars: {len(df1h):,}   5m bars: {len(df5):,}")
 
-    stop_loss_by_class = STOP_LOSS_BY_CLASS if args.stop_loss_by_class else None
-    if args.stop_loss_by_class:
-        print(f"  stop-loss mode: per-class "
-              f"(DEEP={STOP_LOSS_BY_CLASS['DEEP']*100:.0f}%, "
-              f"MID={STOP_LOSS_BY_CLASS['MID']*100:.0f}%, "
-              f"SHALLOW={STOP_LOSS_BY_CLASS['SHALLOW']*100:.0f}%)")
+    if stop_loss_by_class:
+        print(f"Running backtest (stop_loss=BY_CLASS DEEP={STOP_LOSS_BY_CLASS['DEEP']*100:.0f}% "
+              f"MID={STOP_LOSS_BY_CLASS['MID']*100:.0f}% "
+              f"SHALLOW={STOP_LOSS_BY_CLASS['SHALLOW']*100:.0f}%, "
+              f"min_peak_bars={args.min_peak_bars}) ...")
     else:
-        print(f"  stop-loss mode: flat {args.stop_loss*100:.0f}%")
+        flat = args.stop_loss if args.stop_loss is not None else 0.15
+        print(f"Running backtest (stop_loss={flat*100:.0f}%, "
+              f"min_peak_bars={args.min_peak_bars}) ...")
 
     kwargs = {}
     if args.min_dwell is not None:
         kwargs["regime5_min_dwell_bars"] = args.min_dwell
 
     with _TempDB() as db_path:
-        print("Running v30 supervisor ...")
         sup = MacroSupervisor(db_path=db_path, **kwargs)
         sup.apply_to_df(df5.iloc[:1].copy(), df1h.copy())
 
@@ -435,8 +437,6 @@ def main():
         import eth_macrosupervisor_v30_backtest as _self
         _self.MIN_PEAK_BARS = args.min_peak_bars
 
-        print(f"Running backtest (stop_loss={args.stop_loss*100:.0f}%, "
-              f"min_peak_bars={args.min_peak_bars}) ...")
         trades_df = run_backtest(
             h_ref, sup,
             stop_loss=args.stop_loss,
