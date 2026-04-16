@@ -22,10 +22,10 @@ optional bull_class parameter and adjusts:
   - Recommended alloc_pct (fraction of available capital to deploy)
   - Recommended stop_loss (absolute drawdown from entry-peak to hard exit)
 
-Per-class defaults:
+Per-class defaults (aligned with backtest findings v30.2):
   DEEP    : alloc=70%, stop=-20%, T1=+12%, T2=+20%, T3=+30%
   MID     : alloc=30%, stop=-12%, T1=+8%,  T2=+12%, T3=+18%  (caution)
-  SHALLOW : alloc=45%, stop=-10%, T1=+10%, T2=+15%, T3=+20%
+  SHALLOW : alloc=45%, stop=-15%, T1=+10%, T2=+15%, T3=+20%  (stop raised from -10%)
   UNKNOWN : alloc=40%, stop=-15%, T1=+10%, T2=+15%, T3=+20%  (safe default)
 
 Tranche schedule (applied to avg_entry cost basis):
@@ -66,21 +66,21 @@ from typing import Optional, Dict
 @dataclass
 class BullClassConfig:
     """Per-class sizing and exit parameters."""
-    bull_class:    str
-    alloc_pct:     float   # fraction of available capital to deploy (0-1)
-    stop_loss:     float   # hard stop from entry-peak, e.g. -0.20 = -20%
-    t1_target:     float   # T1 tranche profit target, e.g. 0.12 = +12%
-    t2_target:     float   # T2 tranche profit target
-    t3_target:     float   # T3 tranche profit target (sell all remaining)
-    ovr1_threshold: float  # OVR-1 (CRASH regime) minimum gain to trigger
-    ovr2_threshold: float  # OVR-2 (CORRECTION regime) minimum gain to trigger
-    ovr3_threshold: float  # OVR-3 (time pressure >90 days) minimum gain
-    ovr4_threshold: float  # OVR-4 (reversion) floor after peak
+    bull_class:     str
+    alloc_pct:      float   # fraction of available capital to deploy (0-1)
+    stop_loss:      float   # hard stop from entry-peak, e.g. -0.20 = -20%
+    t1_target:      float   # T1 tranche profit target, e.g. 0.12 = +12%
+    t2_target:      float   # T2 tranche profit target
+    t3_target:      float   # T3 tranche profit target (sell all remaining)
+    ovr1_threshold: float   # OVR-1 (CRASH regime) minimum gain to trigger
+    ovr2_threshold: float   # OVR-2 (CORRECTION regime) minimum gain to trigger
+    ovr3_threshold: float   # OVR-3 (time pressure >90 days) minimum gain
+    ovr4_threshold: float   # OVR-4 (reversion) floor after peak
 
 
 BULL_CLASS_CONFIGS: Dict[str, BullClassConfig] = {
     # DEEP: Large recovery swings expected. Deploy more capital, wider stops,
-    # higher tranche targets. Historical: 50% win rate, +25.8% total.
+    # higher tranche targets. Historical: 50% win rate, +25.9% total.
     "DEEP": BullClassConfig(
         bull_class="DEEP",
         alloc_pct=0.70,
@@ -107,12 +107,14 @@ BULL_CLASS_CONFIGS: Dict[str, BullClassConfig] = {
         ovr3_threshold=0.05,
         ovr4_threshold=0.02,
     ),
-    # SHALLOW: Momentum trades. Moderate size, tight stop, standard targets.
-    # Historical: 56% win rate, +118.6% total (bulk of the PnL).
+    # SHALLOW: Momentum trades. Moderate size, standard stop, standard targets.
+    # Historical: 56% win rate, +118.6% total (bulk of PnL).
+    # stop_loss raised from -0.10 to -0.15 (v30.2): tighter stop was cutting
+    # winners that needed -10% to -14% drawdown room before recovering.
     "SHALLOW": BullClassConfig(
         bull_class="SHALLOW",
         alloc_pct=0.45,
-        stop_loss=-0.10,
+        stop_loss=-0.15,
         t1_target=0.10,
         t2_target=0.15,
         t3_target=0.20,
@@ -224,11 +226,11 @@ class PositionReserveManager:
         if self.is_done:
             return SellSignal()
 
-        self._days_held    = days_held
-        unrealized_pct     = (price - self.avg_entry) / self.avg_entry
-        unrealized_usd     = (price - self.avg_entry) * self.remaining_qty
+        self._days_held       = days_held
+        unrealized_pct        = (price - self.avg_entry) / self.avg_entry
+        unrealized_usd        = (price - self.avg_entry) * self.remaining_qty
         self._peak_unrealized = max(self._peak_unrealized, unrealized_pct)
-        cfg                = self.cfg
+        cfg                   = self.cfg
 
         # ── OVERRIDE checks (priority over tranche schedule) ─────────────────
 

@@ -29,8 +29,15 @@ When --stop-loss-by-class is set, each trade uses a class-specific hard stop
 instead of the flat --stop-loss value:
   DEEP    : -20%  (large recovery swings; wider noise tolerance)
   MID     : -12%  (historically 0% win rate; cut losses fast)
-  SHALLOW : -10%  (momentum trades; small drawdowns expected)
+  SHALLOW : -15%  (reverted from -10%; tighter stop was cutting winners early)
 The flat --stop-loss value is used as the fallback if the class is unknown.
+
+History
+-------
+  v30.1 : Initial per-class stops (DEEP=20%, MID=12%, SHALLOW=10%)
+  v30.2 : Raised SHALLOW stop from 10% -> 15% after backtest showed -37.3pp
+           regression. SHALLOW trades need -10% to -14% drawdown room before
+           recovering. Only 1 stop fired under flat 15%; 10 fired at 10%.
 
 Outputs
 -------
@@ -40,7 +47,7 @@ Outputs
 Usage
 -----
   python eth_macrosupervisor_v30_backtest.py
-  python eth_macrosupervisor_v30_backtest.py --start 2021-01-01 --end 2026-04-15
+  python eth_macrosupervisor_v30_backtest.py --start 2021-01-01 --end 2026-04-16
   python eth_macrosupervisor_v30_backtest.py --stop-loss 0.12
   python eth_macrosupervisor_v30_backtest.py --stop-loss-by-class
   python eth_macrosupervisor_v30_backtest.py --out ./backtest_out/
@@ -89,12 +96,13 @@ PEAK_REGIMES  = {"BULL", "RANGE"}
 MIN_PEAK_BARS = 48
 
 # Per-class stop-loss used when --stop-loss-by-class is enabled.
-# Derived from backtest analysis: DEEP entries have wider swings,
-# MID has 0% win rate so cut fast, SHALLOW are tight momentum trades.
+# DEEP  : wider stop -- large recovery swings need noise room
+# MID   : tighter stop -- 0% historical win rate, cut losses fast
+# SHALLOW: flat baseline -- backtest showed 10% was too tight, cut winners early
 STOP_LOSS_BY_CLASS: Dict[str, float] = {
     "DEEP":    0.20,   # -20%
     "MID":     0.12,   # -12%
-    "SHALLOW": 0.10,   # -10%
+    "SHALLOW": 0.15,   # -15%  (raised from 0.10 in v30.2)
 }
 
 
@@ -205,7 +213,7 @@ def run_backtest(
     entry_price       = None
     cycle_trough      = None
     peak_since_entry  = None
-    active_stop_loss  = stop_loss   # resolved per-trade when class is known
+    active_stop_loss  = stop_loss
 
     prev_regime = str(regime_arr[0])
 
@@ -224,7 +232,6 @@ def run_backtest(
             )
             peak_since_entry = close
 
-            # Resolve stop-loss for this trade
             bull_class_now = classify_bull_depth(cycle_trough)
             if stop_loss_by_class is not None:
                 active_stop_loss = stop_loss_by_class.get(bull_class_now, stop_loss)
@@ -374,7 +381,7 @@ def main():
                     help="Flat hard stop from entry-peak (default 0.15 = 15%%). "
                          "Used as fallback when --stop-loss-by-class is set.")
     ap.add_argument("--stop-loss-by-class", action="store_true",
-                    help="Use per-class stop-loss: DEEP=-20%%, MID=-12%%, SHALLOW=-10%%. "
+                    help="Use per-class stop-loss: DEEP=-20%%, MID=-12%%, SHALLOW=-15%%. "
                          "Overrides --stop-loss per trade based on bull_class. "
                          "--stop-loss is still used as the fallback for unknown classes.")
     ap.add_argument("--min-dwell", type=int,   default=None)
