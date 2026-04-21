@@ -19,16 +19,18 @@ the regime classifier emits during bear-market consolidation.
 
 BULL class definitions
 ----------------------
-  DEEP    : cycle_trough_pct <= -30%
-  MID     : cycle_trough_pct in (-30%, -15%]
-  SHALLOW : cycle_trough_pct >  -15%  (or no qualifying peak found)
+  DEEP          : cycle_trough_pct <= -30%
+  MID           : cycle_trough_pct in (-30%, -15%]
+  SHALLOW_RECOV : cycle_trough_pct in (-15%, 0%)  -- small dip recovery
+  SHALLOW_CONT  : cycle_trough_pct == 0.0         -- direct RANGE->BULL, no crash
 
 Per-class stop-loss (default behavior)
 ---------------------------------------
 By default, each trade uses a class-specific hard stop:
-  DEEP    : -20%  (large recovery swings; wider noise tolerance)
-  MID     : -15%
-  SHALLOW : -10%
+  DEEP          : -20%  (large recovery swings; wider noise tolerance)
+  MID           : -12%
+  SHALLOW_RECOV : -10%
+  SHALLOW_CONT  : -10%
 Pass --no-stop-loss-by-class to use a single flat stop (--stop-loss).
 
 History
@@ -40,10 +42,14 @@ History
   v30.3 : Made stop-loss-by-class the default. MID reset to 15%, SHALLOW=10%.
            Signature: run_backtest(h1_df, sup, stop_loss=None,
            stop_loss_by_class=True, debug=False)
+  v30.4 : Reverted MID stop to 0.12 (0% win rate confirmed at 15%).
+           Split SHALLOW into SHALLOW_CONT (trough=0%, direct RANGE->BULL)
+           and SHALLOW_RECOV (small dip, -15% to 0%). Added entry_type
+           column to trade rows ("continuation" | "recovery").
 
 Outputs
 -------
-  eth_backtest_v30_trades.csv   -- one row per trade (includes stop_loss_used)
+  eth_backtest_v30_trades.csv   -- one row per trade (includes stop_loss_used, entry_type)
   eth_backtest_v30_summary.csv  -- aggregate stats by BULL class
 
 Usage
@@ -88,7 +94,7 @@ class _TempDB:
 # ---------------------------------------------------------------------------
 
 DEEP_THRESHOLD    = -0.30   # cycle trough <= -30% -> DEEP
-SHALLOW_THRESHOLD = -0.15   # cycle trough >  -15% -> SHALLOW
+SHALLOW_THRESHOLD = -0.15   # cycle trough >  -15% -> SHALLOW_RECOV or SHALLOW_CONT
 
 PAUSE_REGIMES = {"CRASH", "CORRECTION", "RECOVERY"}
 PEAK_REGIMES  = {"BULL", "RANGE"}
@@ -99,9 +105,10 @@ MIN_PEAK_BARS = 48
 
 # Per-class stop-loss — default behavior when stop_loss_by_class=True.
 STOP_LOSS_BY_CLASS: Dict[str, float] = {
-    "DEEP":    0.20,   # 20% drawdown from peak
-    "MID":     0.15,   # 15%
-    "SHALLOW": 0.10,   # 10%
+    "DEEP":          0.20,   # 20% drawdown from peak
+    "MID":           0.12,   # reverted — 0% win rate confirmed at 15%
+    "SHALLOW_RECOV": 0.10,   # small dip recovery (-15% to 0%)
+    "SHALLOW_CONT":  0.10,   # direct RANGE->BULL, no crash preceded
 }
 
 
@@ -110,7 +117,9 @@ def classify_bull_depth(cycle_trough_pct: float) -> str:
     if dd <= DEEP_THRESHOLD:
         return "DEEP"
     if dd > SHALLOW_THRESHOLD:
-        return "SHALLOW"
+        if dd == 0.0:
+            return "SHALLOW_CONT"   # direct RANGE->BULL, no crash
+        return "SHALLOW_RECOV"      # small dip recovery (-15% to 0%)
     return "MID"
 
 
@@ -129,7 +138,7 @@ def _cycle_trough_pct(
       trough_window = close[block_end+1   : entry_idx]        # gap after block
 
     If trough_window is empty (block ends at entry-1), this is a direct
-    RANGE->BULL transition with no crash in between -> trough = 0.0 (SHALLOW).
+    RANGE->BULL transition with no crash in between -> trough = 0.0 (SHALLOW_CONT).
     Short blip blocks are skipped because MIN_PEAK_BARS=48 filters them out.
     """
     j = entry_idx - 1
@@ -191,7 +200,7 @@ def run_backtest(
     Exit   : first CRASH signal, hard stop from peak, or end of data.
 
     stop_loss_by_class : if True (default), each trade uses the class-specific
-                         stop from STOP_LOSS_BY_CLASS (DEEP/MID/SHALLOW).
+                         stop from STOP_LOSS_BY_CLASS (DEEP/MID/SHALLOW_RECOV/SHALLOW_CONT).
                          If False, uses stop_loss (flat); defaults to 0.15 if
                          stop_loss is None.
     """
@@ -267,6 +276,7 @@ def run_backtest(
                 gross_ret  = (close - entry_price) / entry_price
                 net_ret    = gross_ret - FEE_RATE * 2
                 bull_class = classify_bull_depth(cycle_trough)
+                entry_type = "continuation" if cycle_trough == 0.0 else "recovery"
 
                 trades.append({
                     "entry_ts":             str(ts_arr[entry_bar]),
@@ -277,6 +287,7 @@ def run_backtest(
                     "days_held":            round(bars_held / 24, 2),
                     "cycle_trough_pct":     cycle_trough,
                     "bull_class":           bull_class,
+                    "entry_type":           entry_type,
                     "stop_loss_used":       round(active_stop_loss * 100, 1),
                     "gross_return_pct":     round(gross_ret * 100, 2),
                     "net_return_pct":       round(net_ret * 100, 2),
@@ -308,7 +319,7 @@ def build_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
     records = []
     groups  = [("ALL", trades_df)] + [
         (cls, trades_df[trades_df["bull_class"] == cls])
-        for cls in ["DEEP", "MID", "SHALLOW"]
+        for cls in ["DEEP", "MID", "SHALLOW_RECOV", "SHALLOW_CONT"]
         if (trades_df["bull_class"] == cls).any()
     ]
 
@@ -345,13 +356,13 @@ def print_report(trades_df: pd.DataFrame, summary_df: pd.DataFrame) -> None:
     print(f"\n{SEP}")
     print("  ETH MacroSupervisor v30 Backtest Report")
     print(SEP)
-    print(f"  {'bull_class':<10} {'trades':>6} {'win%':>6} "
+    print(f"  {'bull_class':<14} {'trades':>6} {'win%':>6} "
           f"{'mean%':>7} {'med%':>7} {'total%':>8} "
           f"{'med_days':>9} {'trough%':>8} {'stop%':>6}")
     print("  " + "-" * 70)
     for _, row in summary_df.iterrows():
         stop_str = f"{row['mean_stop_loss_used']:>5.0f}%" if row.get('mean_stop_loss_used') is not None else "  n/a"
-        print(f"  {row['bull_class']:<10} "
+        print(f"  {row['bull_class']:<14} "
               f"{int(row['trades']):>6} "
               f"{row['win_rate_pct']:>5.0f}% "
               f"{row['mean_net_ret_pct']:>+7.1f}% "
@@ -415,9 +426,11 @@ def main():
     print(f"  1h bars: {len(df1h):,}   5m bars: {len(df5):,}")
 
     if stop_loss_by_class:
-        print(f"Running backtest (stop_loss=BY_CLASS DEEP={STOP_LOSS_BY_CLASS['DEEP']*100:.0f}% "
+        print(f"Running backtest (stop_loss=BY_CLASS "
+              f"DEEP={STOP_LOSS_BY_CLASS['DEEP']*100:.0f}% "
               f"MID={STOP_LOSS_BY_CLASS['MID']*100:.0f}% "
-              f"SHALLOW={STOP_LOSS_BY_CLASS['SHALLOW']*100:.0f}%, "
+              f"SHALLOW_RECOV={STOP_LOSS_BY_CLASS['SHALLOW_RECOV']*100:.0f}% "
+              f"SHALLOW_CONT={STOP_LOSS_BY_CLASS['SHALLOW_CONT']*100:.0f}%, "
               f"min_peak_bars={args.min_peak_bars}) ...")
     else:
         flat = args.stop_loss if args.stop_loss is not None else 0.15
@@ -446,10 +459,12 @@ def main():
 
     if not trades_df.empty:
         print(f"  Trough distribution:")
-        print(f"    DEEP    (<=-30%): {(trades_df.cycle_trough_pct <= -30).sum()}")
-        print(f"    MID  (-30%,-15%]: "
+        print(f"    DEEP          (<=-30%): {(trades_df.cycle_trough_pct <= -30).sum()}")
+        print(f"    MID        (-30%,-15%]: "
               f"{((trades_df.cycle_trough_pct > -30) & (trades_df.cycle_trough_pct <= -15)).sum()}")
-        print(f"    SHALLOW  (>-15%): {(trades_df.cycle_trough_pct > -15).sum()}")
+        print(f"    SHALLOW_RECOV (-15%,0%): "
+              f"{((trades_df.cycle_trough_pct > -15) & (trades_df.cycle_trough_pct < 0)).sum()}")
+        print(f"    SHALLOW_CONT    (==0%): {(trades_df.cycle_trough_pct == 0).sum()}")
         print(f"    trough range: {trades_df.cycle_trough_pct.min():.1f}% "
               f"to {trades_df.cycle_trough_pct.max():.1f}%")
         print()
