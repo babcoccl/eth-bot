@@ -367,26 +367,6 @@ class MacroSupervisor:
 
         return committed_regime, candidate_regime, candidate_dwell_ct, committed_dwell_ct
 
-    def _build_transition_log(self, h: pd.DataFrame) -> None:
-        """
-        Walk the computed h DataFrame and populate self._regime_transitions
-        with one entry per regime5 transition. Called at the end of
-        _compute_h1_signals() before returning h.
-        """
-        self._regime_transitions = []
-        prev_regime = None
-        for _, row in h.iterrows():
-            r = str(row["regime5"])
-            if r != prev_regime:
-                self._regime_transitions.append({
-                    "ts":           str(row["ts"]),
-                    "from_regime":  r,
-                    "price":        round(float(row["close"]), 2),
-                    "rsi":          round(float(row["rsi"]), 1) if not pd.isna(row["rsi"]) else None,
-                    "drawdown_pct": round(float(row["drawdown"]) * 100, 2),
-                })
-                prev_regime = r
-
     # ------------------------------------------------------------------
     # Regime5 classifier (unchanged pause/resume logic from v29;
     # v30 adds CORRECTION floor fix)
