@@ -31,6 +31,13 @@ By default, each trade uses a class-specific hard stop:
   SHALLOW_CONT  : -10%
 Pass --no-stop-loss-by-class to use a single flat stop (--stop-loss).
 
+Caching
+-------
+  --end defaults to yesterday so fetch_ohlcv() always writes a Parquet cache.
+  The cache lives in ./ohlcv_cache/ (git-ignored). First run is slow; every
+  subsequent run with the same date range loads from disk in seconds.
+  Pass --end today's date explicitly to include today's partial candles.
+
 History
 -------
   v30.1 : Initial per-class stops (DEEP=20%, MID=12%, SHALLOW=10%)
@@ -45,9 +52,12 @@ History
            and SHALLOW_RECOV (small dip, -15% to 0%). Added entry_type
            column to trade rows ("continuation" | "recovery").
   v30.5 : Merged MID into SHALLOW_RECOV. MID had n=2 over 5 years, both
-           stop-loss exits — bad entry signal, not a stop calibration issue.
+           stop-loss exits -- bad entry signal, not a stop calibration issue.
            SHALLOW_RECOV now covers the full (-30%, 0%) band.
            DEEP_THRESHOLD unchanged at -30%.
+  v30.6 : Default --end changed from today to yesterday so the ohlcv Parquet
+           cache always activates for routine backtest runs. Pass --end
+           explicitly with today's date to include partial candles.
 
 Outputs
 -------
@@ -57,7 +67,7 @@ Outputs
 Usage
 -----
   python eth_macrosupervisor_v30_backtest.py
-  python eth_macrosupervisor_v30_backtest.py --start 2021-01-01 --end 2026-04-16
+  python eth_macrosupervisor_v30_backtest.py --start 2021-01-01 --end 2026-04-21
   python eth_macrosupervisor_v30_backtest.py --stop-loss 0.12 --no-stop-loss-by-class
   python eth_macrosupervisor_v30_backtest.py --no-stop-loss-by-class --stop-loss 0.15
   python eth_macrosupervisor_v30_backtest.py --out ./backtest_out/
@@ -95,7 +105,7 @@ class _TempDB:
 # BULL depth classification
 # ---------------------------------------------------------------------------
 
-DEEP_THRESHOLD    = -0.30   # cycle trough <= -30% -> DEEP
+DEEP_THRESHOLD = -0.30   # cycle trough <= -30% -> DEEP
 
 PAUSE_REGIMES = {"CRASH", "CORRECTION", "RECOVERY"}
 PEAK_REGIMES  = {"BULL", "RANGE"}
@@ -386,7 +396,10 @@ def main():
         description="MacroSupervisor v30 backtest harness"
     )
     ap.add_argument("--start",     default="2021-01-01")
-    ap.add_argument("--end",       default=None)
+    ap.add_argument("--end",       default=None,
+                    help="End date YYYY-MM-DD (default: yesterday, so the ohlcv "
+                         "cache always activates). Pass today's date explicitly "
+                         "to include partial candles.")
     ap.add_argument("--symbol",    default="ETH/USD")
     ap.add_argument("--stop-loss", type=float, default=None,
                     help="Single flat stop-loss (overrides --stop-loss-by-class). "
@@ -410,7 +423,9 @@ def main():
         sys.exit(1)
 
     start_dt = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_s    = args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Default to yesterday so until_dt is always > 24h ago and the Parquet
+    # cache in ./ohlcv_cache/ activates. Pass --end today to get partial candles.
+    end_s    = args.end or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     end_dt   = (
         datetime.strptime(end_s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         + timedelta(days=1)
