@@ -79,7 +79,7 @@ import numpy as np
 import pandas as pd
 
 from eth_bot_interface import BotInterface, BotStatus, Position, Lot
-from eth_bull_classifer import STOP_LOSS_BY_CLASS
+from eth_bull_classifier import STOP_LOSS_BY_CLASS
 
 warnings.filterwarnings("ignore")
 

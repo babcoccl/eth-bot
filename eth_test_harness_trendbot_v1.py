@@ -44,6 +44,7 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
 
         df5  = fetch_ohlcv(symbol, "5m",  warm_dt, ext_end)
         df1h = fetch_ohlcv(symbol, "1h",  warm_dt, ext_end)
+        print(f"  DEBUG {window['label']} shift={shift}: df5={df5 is not None and len(df5)}, df1h={df1h is not None and len(df1h)}")
 
         if df5 is None or len(df5) < 50:
             continue
