@@ -2,19 +2,23 @@
 """
 eth_bull_depth_classifier.py
 =============================
-Standalone BULL depth classifier.
+Standalone BULL depth classifier (CSV-based analysis tool).
 
 Takes eth_audit_transitions.csv (or any transitions CSV with columns
   version, from_regime, start_ts, drawdown_at_entry_pct)
 and tags every BULL segment with a depth class based on the PRECEDING
-CRASH cycle trough (not the drawdown at the BULL entry bar itself,
-which is always near-zero due to partial recovery by commit time).
+CRASH cycle trough.
 
-Depth classes
--------------
-  DEEP    : cycle_trough_pct <= -30%
-  MID     : cycle_trough_pct in (-30%, -15%]
-  SHALLOW : cycle_trough_pct >  -15%
+Depth classes (see eth_bull_classifier.py for authoritative definitions)
+------------------------------------------------------------------------
+  DEEP                : cycle_trough_pct <= -30%
+  SHALLOW_RECOV_DEEP  : cycle_trough_pct in (-30%, -13%]  — skipped at entry
+  SHALLOW_RECOV_LIGHT : cycle_trough_pct in (-13%, 0%)    — active
+  SHALLOW_CONT        : cycle_trough_pct == 0.0            — direct RANGE->BULL
+
+NOTE: All classification logic lives in eth_bull_classifier.py.
+      This file is a CSV analysis tool only. Do not add classification
+      logic here — add it to eth_bull_classifier.py instead.
 
 Outputs
 -------
@@ -24,12 +28,14 @@ Usage
 -----
   python eth_bull_depth_classifier.py
   python eth_bull_depth_classifier.py --transitions eth_audit_transitions.csv
-  python eth_bull_depth_classifier.py --deep-threshold -25
 """
 
 from __future__ import annotations
-# eth_bull_depth_classifier.py — top of file, after existing imports
-# Re-export from authoritative module so existing callers don't break
+import argparse, os, sys
+import pandas as pd
+import numpy as np
+
+# All classification logic is authoritative in eth_bull_classifier.py
 from eth_bull_classifier import (
     classify_bull_depth,
     _cycle_trough_pct,
@@ -40,42 +46,16 @@ from eth_bull_classifier import (
     PAUSE_REGIMES,
     PEAK_REGIMES,
 )
-import argparse, os, sys
-import pandas as pd
-import numpy as np
+
+DEEP_DEFAULT    = DEEP_THRESHOLD * 100     # -30.0
+SHALLOW_DEFAULT = SHALLOW_RECOV_CUTOFF * 100  # -13.0
 
 
-DEEP_DEFAULT    = -30.0
-SHALLOW_DEFAULT = -15.0
-
-PAUSE_REGIMES = {"CRASH", "CORRECTION", "RECOVERY"}
-
-
-def classify_bull_depth(
-    dd_pct: float,
-    deep_threshold: float = DEEP_DEFAULT,
-    shallow_threshold: float = SHALLOW_DEFAULT,
-) -> str:
-    if dd_pct <= deep_threshold:
-        return "DEEP"
-    if dd_pct > shallow_threshold:
-        return "SHALLOW"
-    return "MID"
-
-
-def _find_cycle_trough(
-    df: pd.DataFrame,
-    bull_idx: int,
-) -> float:
+def _find_cycle_trough(df: pd.DataFrame, bull_idx: int) -> float:
     """
     Walk backwards from bull_idx through consecutive CRASH/CORRECTION/RECOVERY
     rows and return the minimum drawdown_at_entry_pct encountered.
-
-    This reconstructs the cycle trough from the transitions CSV, where each
-    row represents a regime segment and drawdown_at_entry_pct is the
-    rolling-peak drawdown at the START of that segment.
-
-    Falls back to the BULL row's own drawdown if no pause segment found.
+    Used only for CSV-based transitions analysis (not live/backtest OHLCV).
     """
     trough = 0.0
     j = bull_idx - 1
@@ -91,7 +71,6 @@ def _find_cycle_trough(
         else:
             break
     if not found:
-        # RANGE->BULL direct: look back up to 5 rows for any pause
         start = max(0, bull_idx - 5)
         for k in range(start, bull_idx):
             r = str(df.iloc[k]["from_regime"])
@@ -105,8 +84,6 @@ def _find_cycle_trough(
 def build_bull_depth_table(
     transitions_path: str,
     version: str = "v30",
-    deep_threshold: float = DEEP_DEFAULT,
-    shallow_threshold: float = SHALLOW_DEFAULT,
 ) -> pd.DataFrame:
     if not os.path.exists(transitions_path):
         raise FileNotFoundError(
@@ -124,19 +101,14 @@ def build_bull_depth_table(
         print(f"[WARN] No BULL segments found for version={version}")
         return bull_rows
 
-    troughs = []
-    for idx in bull_rows.index:
-        trough = _find_cycle_trough(df, idx)
-        troughs.append(trough)
-
+    troughs = [_find_cycle_trough(df, idx) for idx in bull_rows.index]
     bull_rows = bull_rows.copy()
     bull_rows["cycle_trough_pct"] = troughs
     bull_rows["bull_class"] = bull_rows["cycle_trough_pct"].apply(
-        lambda x: classify_bull_depth(float(x), deep_threshold, shallow_threshold)
+        lambda x: classify_bull_depth(float(x))
     )
-    # depth_score: 1.0 = at the DEEP threshold, >1.0 = deeper
     bull_rows["depth_score"] = (
-        bull_rows["cycle_trough_pct"] / deep_threshold
+        bull_rows["cycle_trough_pct"] / (DEEP_THRESHOLD * 100)
     ).clip(upper=3.0).round(3)
 
     cols = [
@@ -175,68 +147,16 @@ def print_depth_report(bull_df: pd.DataFrame, version: str) -> None:
             print(f"    rsi       : mean={sub['rsi_at_entry'].mean():.1f}")
     print()
 
-MIN_PEAK_BARS = 48
-PEAK_REGIMES  = {"BULL", "RANGE"}
-
-def _cycle_trough_pct(
-    regime_arr, close_arr, entry_idx,
-    min_peak_bars: int = MIN_PEAK_BARS,
-    debug: bool = False,
-):
-    """
-    Walk backwards from entry_idx to find the last qualifying BULL/RANGE
-    block (>= min_peak_bars), take its max close as reference price, then
-    find the minimum close between that block and entry_idx.
-    Returns (trough_pct, ref_bar_idx, trough_bar_idx).
-    trough_pct == 0.0 means no qualifying crash preceded this BULL entry
-    (direct RANGE->BULL continuation).
-    """
-    n = entry_idx
-    # find end of last qualifying peak block
-    peak_end = n - 1
-    while peak_end >= 0 and str(regime_arr[peak_end]) not in PEAK_REGIMES:
-        peak_end -= 1
-    if peak_end < 0:
-        return 0.0, -1, -1
-
-    # walk back to find the start of that peak block
-    peak_start = peak_end
-    while peak_start > 0 and str(regime_arr[peak_start - 1]) in PEAK_REGIMES:
-        peak_start -= 1
-
-    block_len = peak_end - peak_start + 1
-    if block_len < min_peak_bars:
-        return 0.0, -1, -1
-
-    ref_price = close_arr[peak_start:peak_end + 1].max()
-    ref_bar   = int(np.argmax(close_arr[peak_start:peak_end + 1])) + peak_start
-
-    # find trough between peak block end and entry bar
-    search_start = peak_end + 1
-    search_end   = n
-    if search_start >= search_end:
-        return 0.0, ref_bar, ref_bar
-
-    trough_price = close_arr[search_start:search_end].min()
-    trough_bar   = int(np.argmin(close_arr[search_start:search_end])) + search_start
-    trough_pct   = (trough_price - ref_price) / ref_price * 100.0
-
-    return round(trough_pct, 4), ref_bar, trough_bar
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--transitions",       default="eth_audit_transitions.csv")
-    ap.add_argument("--version",           default="v30")
-    ap.add_argument("--deep-threshold",    type=float, default=DEEP_DEFAULT)
-    ap.add_argument("--shallow-threshold", type=float, default=SHALLOW_DEFAULT)
-    ap.add_argument("--out",               default=".")
+    ap.add_argument("--transitions", default="eth_audit_transitions.csv")
+    ap.add_argument("--version",     default="v30")
+    ap.add_argument("--out",         default=".")
     args = ap.parse_args()
 
     try:
-        bull_df = build_bull_depth_table(
-            args.transitions, args.version,
-            args.deep_threshold, args.shallow_threshold,
-        )
+        bull_df = build_bull_depth_table(args.transitions, args.version)
     except FileNotFoundError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
