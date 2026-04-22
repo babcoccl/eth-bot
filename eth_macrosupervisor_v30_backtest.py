@@ -203,7 +203,7 @@ def _cycle_trough_pct(
 # ---------------------------------------------------------------------------
 
 FEE_RATE = 0.001   # 0.1% per side (Coinbase Advanced)
-skipped_this_bull = False
+
 
 def run_backtest(
     h1_df: pd.DataFrame,
@@ -241,6 +241,7 @@ def run_backtest(
     cycle_trough      = None
     peak_since_entry  = None
     active_stop_loss  = stop_loss if stop_loss is not None else 0.15
+    skipped_this_bull = False
 
     prev_regime = str(regime_arr[0])
 
