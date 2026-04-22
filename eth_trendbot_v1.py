@@ -74,7 +74,6 @@ v1 history:
              not TrendBot parameter tuning.
 """
 
-from socket import close
 import warnings
 import numpy as np
 import pandas as pd
