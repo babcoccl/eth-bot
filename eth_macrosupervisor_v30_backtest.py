@@ -286,13 +286,13 @@ def run_backtest(
                     f"class={bull_class_now} "
                     f"stop={active_stop_loss*100:.0f}%"
                 )
-            # ---- suppress re-entry for skipped BULL segments ----
-            if skipped_this_bull:
-                if cur_regime != "BULL":
-                    skipped_this_bull = False      # BULL segment ended, reset for next one
-                prev_regime = cur_regime
-                continue
 
+
+        # ---- suppress re-entry for skipped BULL segments ----
+        if skipped_this_bull and not in_trade:
+            prev_regime = cur_regime
+            continue
+        
         # ---- while in trade: check exits ----
         if in_trade:
             peak_since_entry = max(peak_since_entry, close)
