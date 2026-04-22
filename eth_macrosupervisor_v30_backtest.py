@@ -265,6 +265,16 @@ def run_backtest(
 
             bull_class_now = classify_bull_depth(cycle_trough)
 
+            # --- SKIP GATE: suppress entries within same macro cycle as a prior skip ---
+            if skipped_this_bull and trough_block_start <= skipped_at_bar:
+                if debug:
+                    print(f"  [SUPPRESS] bar={i} ts={ts} — same cycle as skip at bar={skipped_at_bar}, block_start={trough_block_start}")
+                in_trade = False
+                prev_regime = cur_regime
+                continue
+            else:
+                skipped_this_bull = False  # new cycle confirmed, clear the latch
+
             # Skip SHALLOW_RECOV_DEEP entries — all 5 historical trades were losses.
             # Log as skipped_entry for post-analysis but do not open a position.
             if bull_class_now == "SHALLOW_RECOV_DEEP":
@@ -292,13 +302,6 @@ def run_backtest(
                 )
 
 
-        # ---- suppress re-entry for skipped BULL segments ----
-        if skipped_this_bull and not in_trade:
-            if trough_block_start > skipped_at_bar:
-                skipped_this_bull = False   # new cycle confirmed, allow entry
-            else:
-                prev_regime = cur_regime
-                continue
         
         # ---- while in trade: check exits ----
         if in_trade:
