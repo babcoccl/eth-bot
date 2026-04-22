@@ -191,11 +191,11 @@ def _cycle_trough_pct(
                     f"ref_price={ref_price:.2f} "
                     f"trough={trough:.1f}%"
                 )
-            return trough
+            return trough, block_start, block_end
 
     if debug:
         print(f"  [trough] entry_idx={entry_idx}: no qualifying peak block -> 0.0")
-    return 0.0
+    return 0.0, -1, -1
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ def run_backtest(
     peak_since_entry  = None
     active_stop_loss  = stop_loss if stop_loss is not None else 0.15
     skipped_this_bull = False
-    seen_bear_since_skip = True
+    skipped_at_bar    = -1
 
     prev_regime = str(regime_arr[0])
 
@@ -251,17 +251,13 @@ def run_backtest(
         close      = float(close_arr[i])
         ts         = ts_arr[i]
 
-        if cur_regime in {"CRASH", "CORRECTION"}:
-            seen_bear_since_skip = True
-
         # ---- ENTRY: first bar of a new BULL segment ----
         if not in_trade and cur_regime == "BULL" and prev_regime != "BULL":
-            if seen_bear_since_skip:
-                skipped_this_bull = False
+
             in_trade         = True
             entry_bar        = i
             entry_price      = close
-            cycle_trough     = _cycle_trough_pct(
+            cycle_trough, trough_block_start, trough_block_end = _cycle_trough_pct(
                 regime_arr, close_arr, i, debug=debug
             )
             peak_since_entry = close
@@ -276,7 +272,7 @@ def run_backtest(
                         f"trough={cycle_trough:.1f}% class={bull_class_now} — skipped")
                 in_trade = False
                 skipped_this_bull = True      # suppress re-entry for this BULL segment
-                seen_bear_since_skip = False
+                skipped_at_bar    = i 
                 prev_regime = cur_regime
                 continue
 
@@ -297,8 +293,11 @@ def run_backtest(
 
         # ---- suppress re-entry for skipped BULL segments ----
         if skipped_this_bull and not in_trade:
-            prev_regime = cur_regime
-            continue
+            if trough_block_start > skipped_at_bar:
+                skipped_this_bull = False   # new cycle confirmed, allow entry
+            else:
+                prev_regime = cur_regime
+                continue
         
         # ---- while in trade: check exits ----
         if in_trade:
