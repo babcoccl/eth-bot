@@ -316,4 +316,11 @@ def prepare_indicators(df5, df1h):
     result["bull_class_h1"] = result["bull_class_h1"].ffill().fillna("")
     result = result.reset_index()
 
+    # ── Join regime5 from MacroSupervisor onto 5m bars ───────────────────
+    h_regime = h[["ts", "macro_pause", "regime5"]].set_index("ts")
+    result = result.set_index("ts").join(h_regime, how="left")
+    result["macro_pause"] = result["macro_pause"].ffill().fillna(False).astype(bool)
+    result["regime5"]     = result["regime5"].ffill().fillna("RANGE")
+    result = result.reset_index()
+
     return result
