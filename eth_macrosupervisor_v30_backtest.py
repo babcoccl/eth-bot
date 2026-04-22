@@ -128,6 +128,8 @@ STOP_LOSS_BY_CLASS: Dict[str, float] = {
     "SHALLOW_CONT":         0.10,
 }
 
+
+
 def classify_bull_depth(cycle_trough_pct: float) -> str:
     dd = cycle_trough_pct / 100.0
     if dd <= DEEP_THRESHOLD:
@@ -201,7 +203,7 @@ def _cycle_trough_pct(
 # ---------------------------------------------------------------------------
 
 FEE_RATE = 0.001   # 0.1% per side (Coinbase Advanced)
-
+skipped_this_bull = False
 
 def run_backtest(
     h1_df: pd.DataFrame,
@@ -290,7 +292,7 @@ def run_backtest(
         if skipped_this_bull and not in_trade:
             prev_regime = cur_regime
             continue
-
+        
         # ---- while in trade: check exits ----
         if in_trade:
             peak_since_entry = max(peak_since_entry, close)
