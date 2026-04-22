@@ -30,7 +30,13 @@ import numpy as np
 import pandas as pd
 
 from eth_macrosupervisor_v30 import MacroSupervisor
-from eth_bull_depth_classifier import _cycle_trough_pct, classify_bull_depth
+from eth_bull_classifier import (
+    _cycle_trough_pct,
+    classify_bull_depth,
+    MIN_PEAK_BARS,
+    PEAK_REGIMES,
+    PAUSE_REGIMES,
+)
 
 warnings.filterwarnings("ignore")
 

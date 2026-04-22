@@ -28,6 +28,18 @@ Usage
 """
 
 from __future__ import annotations
+# eth_bull_depth_classifier.py — top of file, after existing imports
+# Re-export from authoritative module so existing callers don't break
+from eth_bull_classifier import (
+    classify_bull_depth,
+    _cycle_trough_pct,
+    STOP_LOSS_BY_CLASS,
+    DEEP_THRESHOLD,
+    SHALLOW_RECOV_CUTOFF,
+    MIN_PEAK_BARS,
+    PAUSE_REGIMES,
+    PEAK_REGIMES,
+)
 import argparse, os, sys
 import pandas as pd
 import numpy as np
@@ -143,7 +155,7 @@ def print_depth_report(bull_df: pd.DataFrame, version: str) -> None:
     print(f"  BULL Depth Classification  [{version}]")
     print(SEP)
     total = len(bull_df)
-    for cls in ["DEEP", "MID", "SHALLOW"]:
+    for cls in ["DEEP", "SHALLOW_RECOV_LIGHT", "SHALLOW_RECOV_DEEP", "SHALLOW_CONT"]:
         sub = bull_df[bull_df["bull_class"] == cls]
         if sub.empty:
             continue
@@ -163,6 +175,53 @@ def print_depth_report(bull_df: pd.DataFrame, version: str) -> None:
             print(f"    rsi       : mean={sub['rsi_at_entry'].mean():.1f}")
     print()
 
+MIN_PEAK_BARS = 48
+PEAK_REGIMES  = {"BULL", "RANGE"}
+
+def _cycle_trough_pct(
+    regime_arr, close_arr, entry_idx,
+    min_peak_bars: int = MIN_PEAK_BARS,
+    debug: bool = False,
+):
+    """
+    Walk backwards from entry_idx to find the last qualifying BULL/RANGE
+    block (>= min_peak_bars), take its max close as reference price, then
+    find the minimum close between that block and entry_idx.
+    Returns (trough_pct, ref_bar_idx, trough_bar_idx).
+    trough_pct == 0.0 means no qualifying crash preceded this BULL entry
+    (direct RANGE->BULL continuation).
+    """
+    n = entry_idx
+    # find end of last qualifying peak block
+    peak_end = n - 1
+    while peak_end >= 0 and str(regime_arr[peak_end]) not in PEAK_REGIMES:
+        peak_end -= 1
+    if peak_end < 0:
+        return 0.0, -1, -1
+
+    # walk back to find the start of that peak block
+    peak_start = peak_end
+    while peak_start > 0 and str(regime_arr[peak_start - 1]) in PEAK_REGIMES:
+        peak_start -= 1
+
+    block_len = peak_end - peak_start + 1
+    if block_len < min_peak_bars:
+        return 0.0, -1, -1
+
+    ref_price = close_arr[peak_start:peak_end + 1].max()
+    ref_bar   = int(np.argmax(close_arr[peak_start:peak_end + 1])) + peak_start
+
+    # find trough between peak block end and entry bar
+    search_start = peak_end + 1
+    search_end   = n
+    if search_start >= search_end:
+        return 0.0, ref_bar, ref_bar
+
+    trough_price = close_arr[search_start:search_end].min()
+    trough_bar   = int(np.argmin(close_arr[search_start:search_end])) + search_start
+    trough_pct   = (trough_price - ref_price) / ref_price * 100.0
+
+    return round(trough_pct, 4), ref_bar, trough_bar
 
 def main():
     ap = argparse.ArgumentParser()
