@@ -19,6 +19,7 @@ Notes:
 """
 
 import argparse, sys, os, warnings
+from eth_macrosupervisor_v30 import MacroSupervisor
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import pandas as pd
@@ -54,7 +55,7 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
         sup._compute_h1_signals(df1h)   # already called inside prepare_indicators,
                                         # but call again here just for the log
         transitions = sup.get_transition_log()
-        print(f"\n  [TRANSITIONS {w['label']}]")
+        print(f"\n  [TRANSITIONS {window['label']}]")
         for t in transitions:
             print(f"    {t['ts']}  {t['from_regime']:<12}  "
                 f"price={t['price']:,.0f}  rsi={t['rsi']}  dd={t['drawdown_pct']}%")
