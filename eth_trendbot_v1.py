@@ -74,6 +74,7 @@ v1 history:
              not TrendBot parameter tuning.
 """
 
+from socket import close
 import warnings
 import numpy as np
 import pandas as pd
@@ -86,7 +87,6 @@ warnings.filterwarnings("ignore")
 PRESETS = {
     "trendbot_v1": {
         "base_qty":           0.05,
-        "target_bps":         180,
         "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
         "uptrend_rsi_max":    44,
         "vol_mult_min":       0.80,
@@ -231,7 +231,8 @@ class TrendBot(BotInterface):
                     self._sell(i, df, close, "pos_stop_loss", sell_fee_pct)
                     continue
 
-                if close >= self._position.avg_entry * (1 + target_bps / 10_000):
+                pos_target = self._position.target_bps if self._position.target_bps is not None else 180
+                if close >= self._position.avg_entry * (1 + pos_target / 10_000):
                     self._sell(i, df, close, "target", sell_fee_pct)
                     continue
 
