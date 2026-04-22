@@ -51,7 +51,7 @@ from __future__ import annotations
 import argparse, json, os, sqlite3, sys, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-from eth_bull_classifer import _cycle_trough_pct, classify_bull_depth
+from eth_bull_classifier import _cycle_trough_pct, classify_bull_depth
 import numpy as np
 import pandas as pd
 
@@ -367,6 +367,26 @@ class MacroSupervisor:
 
         return committed_regime, candidate_regime, candidate_dwell_ct, committed_dwell_ct
 
+    def _build_transition_log(self, h: pd.DataFrame) -> None:
+        """
+        Walk the computed h DataFrame and populate self._regime_transitions
+        with one entry per regime5 transition. Called at the end of
+        _compute_h1_signals() before returning h.
+        """
+        self._regime_transitions = []
+        prev_regime = None
+        for _, row in h.iterrows():
+            r = str(row["regime5"])
+            if r != prev_regime:
+                self._regime_transitions.append({
+                    "ts":           str(row["ts"]),
+                    "from_regime":  r,
+                    "price":        round(float(row["close"]), 2),
+                    "rsi":          round(float(row["rsi"]), 1) if not pd.isna(row["rsi"]) else None,
+                    "drawdown_pct": round(float(row["drawdown"]) * 100, 2),
+                })
+                prev_regime = r
+
     # ------------------------------------------------------------------
     # Regime5 classifier (unchanged pause/resume logic from v29;
     # v30 adds CORRECTION floor fix)
@@ -434,6 +454,117 @@ class MacroSupervisor:
         except Exception as exc:
             print(f"[WARN] export_transitions_csv failed: {exc}")
 
+        # ------------------------------------------------------------------
+    # _build_transition_log  (called by _compute_h1_signals)
+    # ------------------------------------------------------------------
+    def _build_transition_log(self, h: pd.DataFrame) -> None:
+        """
+        Walk the computed h DataFrame and populate self._regime_transitions
+        with one entry per regime5 label change.
+        """
+        self._regime_transitions = []
+        prev_regime = None
+        for _, row in h.iterrows():
+            r = str(row["regime5"])
+            if r != prev_regime:
+                self._regime_transitions.append({
+                    "ts":           str(row["ts"]),
+                    "from_regime":  r,
+                    "price":        round(float(row["close"]), 2),
+                    "rsi":          round(float(row["rsi"]), 1) if not pd.isna(row["rsi"]) else None,
+                    "drawdown_pct": round(float(row["drawdown"]) * 100, 2),
+                })
+                prev_regime = r
+
+    # ------------------------------------------------------------------
+    # _persist_regime_transitions  (called by apply_to_df)
+    # ------------------------------------------------------------------
+    def _persist_regime_transitions(self) -> None:
+        """
+        Write self._regime_transitions to the SQLite regime_transitions table.
+        Each call inserts only the transitions from the current session.
+        """
+        if not self._regime_transitions:
+            return
+        try:
+            con = sqlite3.connect(self.db_path)
+            cur = con.cursor()
+            for t in self._regime_transitions:
+                cur.execute(
+                    """
+                    INSERT INTO regime_transitions
+                        (session_id, ts, from_regime, to_regime, trigger, price, rsi, drawdown_pct)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._session_id,
+                        t.get("ts"),
+                        t.get("from_regime"),
+                        t.get("from_regime"),   # to_regime not tracked separately; same as from
+                        "",
+                        t.get("price"),
+                        t.get("rsi"),
+                        t.get("drawdown_pct"),
+                    ),
+                )
+            con.commit()
+            con.close()
+        except Exception as exc:
+            print(f"[WARN] _persist_regime_transitions failed: {exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # _write_regime_state_json  (called by apply_to_df)
+    # ------------------------------------------------------------------
+    def _write_regime_state_json(self) -> None:
+        """
+        Write the current regime state to regime_state.json so live bots
+        can read it without querying the DB.
+        """
+        state = {
+            "session_id":     self._session_id,
+            "current_regime": self.current_regime,
+            "total_h1_bars":  self.total_h1_bars,
+            "total_pause_bars": self.total_pause_bars,
+            "pause_pct":      round(self.total_pause_bars / max(self.total_h1_bars, 1) * 100, 2),
+            "updated_at":     datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            with open(self.regime_json, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as exc:
+            print(f"[WARN] _write_regime_state_json failed: {exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # print_report  (called by main CLI)
+    # ------------------------------------------------------------------
+    def print_report(self) -> None:
+        """Print a human-readable summary of the most recent apply_to_df() run."""
+        SEP = "=" * 60
+        print(f"\n{SEP}")
+        print("  MacroSupervisor v30 — Regime Report")
+        print(SEP)
+        print(f"  Current regime : {self.current_regime}")
+        print(f"  H1 bars        : {self.total_h1_bars:,}")
+        print(f"  Paused bars    : {self.total_pause_bars:,} "
+              f"({self.total_pause_bars / max(self.total_h1_bars, 1) * 100:.1f}%)")
+        print(f"  Pause events   : {len(self.pause_events)}")
+        print(f"  Resume events  : {len(self.resume_events)}")
+        if self.pause_events:
+            print(f"\n  Pause history:")
+            for p in self.pause_events[-5:]:   # show last 5
+                print(f"    {p['ts']}  trigger={p['trigger']}  "
+                      f"dd={p['drawdown']:+.1f}%  rsi={p['rsi']:.0f}")
+        if self.resume_events:
+            print(f"\n  Resume history:")
+            for r in self.resume_events[-5:]:
+                print(f"    {r['ts']}  bars_paused={r['bars_paused']}  "
+                      f"({r['days_paused']:.1f}d)  rsi={r['rsi']:.0f}")
+        if self._regime_transitions:
+            print(f"\n  Last 5 regime transitions:")
+            for t in self._regime_transitions[-5:]:
+                print(f"    {t['ts']}  -> {t['from_regime']}  "
+                      f"price={t['price']}  dd={t['drawdown_pct']:+.1f}%")
+        print()
     # ------------------------------------------------------------------
     # Unchanged helpers from v29
     # ------------------------------------------------------------------
@@ -449,25 +580,25 @@ class MacroSupervisor:
         except Exception:
             return "RANGE"
 
-def get_bull_class_at(self, bar_idx: int) -> Optional[str]:
-    """
-    Return the BULL depth class for the BULL segment starting at bar_idx,
-    or None if bar_idx is not the first bar of a new BULL segment.
-    Requires apply_to_df() to have been called first.
-    Returns: "DEEP" | "SHALLOW_RECOV_LIGHT" | "SHALLOW_RECOV_DEEP" | "SHALLOW_CONT" | None
-    """
-    if self._h1_r5_series is None or not hasattr(self, "_h1_close_arr"):
-        return None
-    regime_arr = self._h1_r5_series.values
-    n = len(regime_arr)
-    if bar_idx <= 0 or bar_idx >= n:
-        return None
-    if str(regime_arr[bar_idx]) != "BULL":
-        return None
-    if str(regime_arr[bar_idx - 1]) == "BULL":
-        return None  # not the first bar of this segment
-    trough, _, _ = _cycle_trough_pct(regime_arr, self._h1_close_arr, bar_idx)
-    return classify_bull_depth(trough)
+    def get_bull_class_at(self, bar_idx: int) -> Optional[str]:
+        """
+        Return the BULL depth class for the BULL segment starting at bar_idx,
+        or None if bar_idx is not the first bar of a new BULL segment.
+        Requires apply_to_df() to have been called first.
+        Returns: "DEEP" | "SHALLOW_RECOV_LIGHT" | "SHALLOW_RECOV_DEEP" | "SHALLOW_CONT" | None
+        """
+        if self._h1_r5_series is None or not hasattr(self, "_h1_close_arr"):
+            return None
+        regime_arr = self._h1_r5_series.values
+        n = len(regime_arr)
+        if bar_idx <= 0 or bar_idx >= n:
+            return None
+        if str(regime_arr[bar_idx]) != "BULL":
+            return None
+        if str(regime_arr[bar_idx - 1]) == "BULL":
+            return None  # not the first bar of this segment
+        trough, _, _ = _cycle_trough_pct(regime_arr, self._h1_close_arr, bar_idx)
+        return classify_bull_depth(trough)
 
 def main():
     ap = argparse.ArgumentParser(description="MacroSupervisor v30 standalone")
