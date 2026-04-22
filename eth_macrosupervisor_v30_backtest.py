@@ -128,6 +128,7 @@ STOP_LOSS_BY_CLASS: Dict[str, float] = {
     "SHALLOW_CONT":         0.10,
 }
 
+skipped_this_bull = False
 
 def classify_bull_depth(cycle_trough_pct: float) -> str:
     dd = cycle_trough_pct / 100.0
@@ -250,6 +251,7 @@ def run_backtest(
 
         # ---- ENTRY: first bar of a new BULL segment ----
         if not in_trade and cur_regime == "BULL" and prev_regime != "BULL":
+            skipped_this_bull = False
             in_trade         = True
             entry_bar        = i
             entry_price      = close
@@ -264,12 +266,10 @@ def run_backtest(
             # Log as skipped_entry for post-analysis but do not open a position.
             if bull_class_now == "SHALLOW_RECOV_DEEP":
                 if debug:
-                    print(
-                        f"  [SKIP]  bar={i} ts={ts} "
-                        f"price={close:.2f} trough={cycle_trough:.1f}% "
-                        f"class={bull_class_now} — skipped"
-                    )
+                    print(f"  [SKIP]  bar={i} ts={ts} price={close:.2f} "
+                        f"trough={cycle_trough:.1f}% class={bull_class_now} — skipped")
                 in_trade = False
+                skipped_this_bull = True      # suppress re-entry for this BULL segment
                 prev_regime = cur_regime
                 continue
 
@@ -286,6 +286,12 @@ def run_backtest(
                     f"class={bull_class_now} "
                     f"stop={active_stop_loss*100:.0f}%"
                 )
+            # ---- suppress re-entry for skipped BULL segments ----
+            if skipped_this_bull:
+                if cur_regime != "BULL":
+                    skipped_this_bull = False      # BULL segment ended, reset for next one
+                prev_regime = cur_regime
+                continue
 
         # ---- while in trade: check exits ----
         if in_trade:
