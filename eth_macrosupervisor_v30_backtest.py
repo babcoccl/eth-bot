@@ -128,8 +128,6 @@ STOP_LOSS_BY_CLASS: Dict[str, float] = {
     "SHALLOW_CONT":         0.10,
 }
 
-skipped_this_bull = False
-
 def classify_bull_depth(cycle_trough_pct: float) -> str:
     dd = cycle_trough_pct / 100.0
     if dd <= DEEP_THRESHOLD:
@@ -292,7 +290,7 @@ def run_backtest(
         if skipped_this_bull and not in_trade:
             prev_regime = cur_regime
             continue
-        
+
         # ---- while in trade: check exits ----
         if in_trade:
             peak_since_entry = max(peak_since_entry, close)
