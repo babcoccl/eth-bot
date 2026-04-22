@@ -63,7 +63,11 @@ History
            and SHALLOW_RECOV_DEEP (trough <= -13%, historically all losses).
            SHALLOW_RECOV_DEEP entries are skipped at entry — 5/5 were losses
            across 5 years. Cutoff constant: SHALLOW_RECOV_CUTOFF = -0.13.
-
+  v30.8 : Fixed ghost entry bug — SHALLOW_RECOV_DEEP skip now suppresses
+           all subsequent re-entries within the same macro cycle. Gate moved
+           inside the entry block; uses trough_block_start <= skipped_at_bar
+           to detect same-cycle re-entries. Removed 3 ghost trades (2021-04,
+           2023-06, 2025-07). Trade count 21 -> 18, win rate 52% -> 61%.
 Outputs
 -------
   eth_backtest_v30_trades.csv   -- one row per trade (includes stop_loss_used, entry_type)
