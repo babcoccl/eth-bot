@@ -262,6 +262,9 @@ def prepare_indicators(df5, df1h):
     d["rsi_prev"] = d["rsi"].shift(1)
     d["atr"]      = calc_atr(d["high"], d["low"], d["close"], IND["atr_period"])
     d["atr_pct"]  = d["atr"] / d["close"].replace(0, np.nan)
+    MACRO_DD_WINDOW = 90 * 288          # 90 days of 5m bars
+    d["rolling_90d_high"] = d["close"].rolling(MACRO_DD_WINDOW, min_periods=1).max()
+    d["macro_dd_pct"]     = (d["close"] - d["rolling_90d_high"]) / d["rolling_90d_high"]
     d["zscore"]   = calc_zscore(d["close"], IND["zscore_window"])
 
     bb_u, bb_m, bb_l, bw = calc_bollinger(d["close"], IND["bb_window"], IND["bb_std"])
