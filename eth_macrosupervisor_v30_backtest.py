@@ -20,15 +20,13 @@ the regime classifier emits during bear-market consolidation.
 BULL class definitions
 ----------------------
   DEEP          : cycle_trough_pct <= -30%
-  MID           : cycle_trough_pct in (-30%, -15%]
-  SHALLOW_RECOV : cycle_trough_pct in (-15%, 0%)  -- small dip recovery
+  SHALLOW_RECOV : cycle_trough_pct in (-30%, 0%)  -- any dip recovery (MID merged in)
   SHALLOW_CONT  : cycle_trough_pct == 0.0         -- direct RANGE->BULL, no crash
 
 Per-class stop-loss (default behavior)
 ---------------------------------------
 By default, each trade uses a class-specific hard stop:
   DEEP          : -20%  (large recovery swings; wider noise tolerance)
-  MID           : -12%
   SHALLOW_RECOV : -10%
   SHALLOW_CONT  : -10%
 Pass --no-stop-loss-by-class to use a single flat stop (--stop-loss).
@@ -46,6 +44,10 @@ History
            Split SHALLOW into SHALLOW_CONT (trough=0%, direct RANGE->BULL)
            and SHALLOW_RECOV (small dip, -15% to 0%). Added entry_type
            column to trade rows ("continuation" | "recovery").
+  v30.5 : Merged MID into SHALLOW_RECOV. MID had n=2 over 5 years, both
+           stop-loss exits — bad entry signal, not a stop calibration issue.
+           SHALLOW_RECOV now covers the full (-30%, 0%) band.
+           DEEP_THRESHOLD unchanged at -30%.
 
 Outputs
 -------
@@ -94,7 +96,6 @@ class _TempDB:
 # ---------------------------------------------------------------------------
 
 DEEP_THRESHOLD    = -0.30   # cycle trough <= -30% -> DEEP
-SHALLOW_THRESHOLD = -0.15   # cycle trough >  -15% -> SHALLOW_RECOV or SHALLOW_CONT
 
 PAUSE_REGIMES = {"CRASH", "CORRECTION", "RECOVERY"}
 PEAK_REGIMES  = {"BULL", "RANGE"}
@@ -106,8 +107,7 @@ MIN_PEAK_BARS = 48
 # Per-class stop-loss — default behavior when stop_loss_by_class=True.
 STOP_LOSS_BY_CLASS: Dict[str, float] = {
     "DEEP":          0.20,   # 20% drawdown from peak
-    "MID":           0.12,   # reverted — 0% win rate confirmed at 15%
-    "SHALLOW_RECOV": 0.10,   # small dip recovery (-15% to 0%)
+    "SHALLOW_RECOV": 0.10,   # any dip recovery — full (-30%, 0%) band (MID merged in)
     "SHALLOW_CONT":  0.10,   # direct RANGE->BULL, no crash preceded
 }
 
@@ -116,11 +116,9 @@ def classify_bull_depth(cycle_trough_pct: float) -> str:
     dd = cycle_trough_pct / 100.0
     if dd <= DEEP_THRESHOLD:
         return "DEEP"
-    if dd > SHALLOW_THRESHOLD:
-        if dd == 0.0:
-            return "SHALLOW_CONT"   # direct RANGE->BULL, no crash
-        return "SHALLOW_RECOV"      # small dip recovery (-15% to 0%)
-    return "MID"
+    if dd == 0.0:
+        return "SHALLOW_CONT"   # direct RANGE->BULL, no crash
+    return "SHALLOW_RECOV"      # any dip recovery: (-30%, 0%)
 
 
 def _cycle_trough_pct(
@@ -200,7 +198,7 @@ def run_backtest(
     Exit   : first CRASH signal, hard stop from peak, or end of data.
 
     stop_loss_by_class : if True (default), each trade uses the class-specific
-                         stop from STOP_LOSS_BY_CLASS (DEEP/MID/SHALLOW_RECOV/SHALLOW_CONT).
+                         stop from STOP_LOSS_BY_CLASS (DEEP/SHALLOW_RECOV/SHALLOW_CONT).
                          If False, uses stop_loss (flat); defaults to 0.15 if
                          stop_loss is None.
     """
@@ -319,7 +317,7 @@ def build_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
     records = []
     groups  = [("ALL", trades_df)] + [
         (cls, trades_df[trades_df["bull_class"] == cls])
-        for cls in ["DEEP", "MID", "SHALLOW_RECOV", "SHALLOW_CONT"]
+        for cls in ["DEEP", "SHALLOW_RECOV", "SHALLOW_CONT"]
         if (trades_df["bull_class"] == cls).any()
     ]
 
@@ -428,7 +426,6 @@ def main():
     if stop_loss_by_class:
         print(f"Running backtest (stop_loss=BY_CLASS "
               f"DEEP={STOP_LOSS_BY_CLASS['DEEP']*100:.0f}% "
-              f"MID={STOP_LOSS_BY_CLASS['MID']*100:.0f}% "
               f"SHALLOW_RECOV={STOP_LOSS_BY_CLASS['SHALLOW_RECOV']*100:.0f}% "
               f"SHALLOW_CONT={STOP_LOSS_BY_CLASS['SHALLOW_CONT']*100:.0f}%, "
               f"min_peak_bars={args.min_peak_bars}) ...")
@@ -460,10 +457,8 @@ def main():
     if not trades_df.empty:
         print(f"  Trough distribution:")
         print(f"    DEEP          (<=-30%): {(trades_df.cycle_trough_pct <= -30).sum()}")
-        print(f"    MID        (-30%,-15%]: "
-              f"{((trades_df.cycle_trough_pct > -30) & (trades_df.cycle_trough_pct <= -15)).sum()}")
-        print(f"    SHALLOW_RECOV (-15%,0%): "
-              f"{((trades_df.cycle_trough_pct > -15) & (trades_df.cycle_trough_pct < 0)).sum()}")
+        print(f"    SHALLOW_RECOV  (-30%,0%): "
+              f"{((trades_df.cycle_trough_pct > -30) & (trades_df.cycle_trough_pct < 0)).sum()}")
         print(f"    SHALLOW_CONT    (==0%): {(trades_df.cycle_trough_pct == 0).sum()}")
         print(f"    trough range: {trades_df.cycle_trough_pct.min():.1f}% "
               f"to {trades_df.cycle_trough_pct.max():.1f}%")
