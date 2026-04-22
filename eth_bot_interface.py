@@ -51,6 +51,7 @@ class Position:
     dca_count:     int   = 0
     entry_bar:     int   = 0
     entry_regime:  str   = "RANGE"
+    bull_class:    str   = ""    # BULL depth class at entry: DEEP | SHALLOW_RECOV_LIGHT | SHALLOW_RECOV_DEEP | SHALLOW_CONT
     lots:          list  = field(default_factory=list)
 
     @property
@@ -78,6 +79,7 @@ class Position:
         self.dca_count    = 0
         self.entry_bar    = 0
         self.entry_regime = "RANGE"
+        self.bull_class   = ""
         self.lots.clear()
 
 
