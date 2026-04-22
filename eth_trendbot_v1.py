@@ -79,6 +79,7 @@ import numpy as np
 import pandas as pd
 
 from eth_bot_interface import BotInterface, BotStatus, Position, Lot
+from eth_bull_classifer import STOP_LOSS_BY_CLASS
 
 warnings.filterwarnings("ignore")
 
@@ -217,7 +218,10 @@ class TrendBot(BotInterface):
             if self._position.is_open:
                 unreal = (close - self._position.avg_entry) / self._position.avg_entry
 
-                if unreal < -psl_pct:
+                bull_cls = self._position.bull_class
+                effective_psl = (STOP_LOSS_BY_CLASS.get(bull_cls, psl_pct)
+                                if bull_cls else psl_pct)
+                if unreal < -effective_psl:
                     self._sell(i, df, close, "pos_stop_loss", sell_fee_pct)
                     continue
 
@@ -301,6 +305,7 @@ class TrendBot(BotInterface):
         self._position.avg_entry  = close
         self._position.peak_price = close
         self._position.entry_bar  = i
+        self._position.bull_class = str(row.get("bull_class_h1", ""))
         self._position.lots = [Lot(qty=qty, price=close,
                                    fee=fee, ts=row["ts"],
                                    row_idx=len(self._trades))]

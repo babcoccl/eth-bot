@@ -29,6 +29,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from eth_macrosupervisor_v30 import MacroSupervisor
+from eth_bull_depth_classifier import _cycle_trough_pct, classify_bull_depth
+
 warnings.filterwarnings("ignore")
 
 # ── Indicator hyper-parameters (never changed since v22) ─────────────────────
@@ -282,4 +285,29 @@ def prepare_indicators(df5, df1h):
         if null_count > 0:
             print(f"[WARN] {null_count} NaN in '{col}' after prepare_indicators "
                   f"(first at row {result[col].isna().idxmax()})")
+
+    # ── BULL depth class (forward-filled from h1 BULL entry bars) ────────────
+    sup = MacroSupervisor()
+    h   = sup._compute_h1_signals(df1h)          # no file I/O side effects
+    regime_arr = h["regime5"].values
+    close_arr  = h["close"].values
+    n          = len(regime_arr)
+
+    bull_class_col = [""] * n
+    for i in range(1, n):
+        if str(regime_arr[i]) == "BULL" and str(regime_arr[i - 1]) != "BULL":
+            trough, _, _ = _cycle_trough_pct(regime_arr, close_arr, i)
+            bull_class_col[i] = classify_bull_depth(trough)
+        elif str(regime_arr[i]) == "BULL":
+            bull_class_col[i] = bull_class_col[i - 1]
+
+    h1_bull = df1h[["ts"]].copy()
+    h1_bull["bull_class_h1"] = bull_class_col
+
+    result = result.set_index("ts").join(
+        h1_bull.set_index("ts")[["bull_class_h1"]], how="left"
+    )
+    result["bull_class_h1"] = result["bull_class_h1"].ffill().fillna("")
+    result = result.reset_index()
+
     return result
