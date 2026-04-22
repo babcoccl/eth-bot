@@ -87,6 +87,12 @@ from __future__ import annotations
 import argparse, os, sys, tempfile
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict
+from eth_bull_classifier import (
+    _cycle_trough_pct, classify_bull_depth,
+    STOP_LOSS_BY_CLASS, DEEP_THRESHOLD,
+    SHALLOW_RECOV_CUTOFF, MIN_PEAK_BARS,
+    PAUSE_REGIMES, PEAK_REGIMES,
+)
 
 import numpy as np
 import pandas as pd
@@ -108,98 +114,6 @@ class _TempDB:
             os.unlink(self.path)
         except OSError:
             pass
-
-
-# ---------------------------------------------------------------------------
-# BULL depth classification
-# ---------------------------------------------------------------------------
-
-DEEP_THRESHOLD = -0.30   # cycle trough <= -30% -> DEEP
-SHALLOW_RECOV_CUTOFF    = -0.13   # cycle trough <= -13% -> SHALLOW_RECOV_DEEP
-
-PAUSE_REGIMES = {"CRASH", "CORRECTION", "RECOVERY"}
-PEAK_REGIMES  = {"BULL", "RANGE"}
-
-# Minimum contiguous BULL/RANGE bars to qualify as a real peak segment.
-# 48 bars = 2 days on 1h data. Filters out brief RANGE blips.
-MIN_PEAK_BARS = 48
-
-# Per-class stop-loss — default behavior when stop_loss_by_class=True.
-STOP_LOSS_BY_CLASS: Dict[str, float] = {
-    "DEEP":                 0.20,
-    "SHALLOW_RECOV_LIGHT":  0.10,   # trough (-13%, 0%) — winners
-    "SHALLOW_RECOV_DEEP":   0.10,   # trough (-30%, -13%] — historically all losses; logged but skipped
-    "SHALLOW_CONT":         0.10,
-}
-
-
-
-def classify_bull_depth(cycle_trough_pct: float) -> str:
-    dd = cycle_trough_pct / 100.0
-    if dd <= DEEP_THRESHOLD:
-        return "DEEP"
-    if dd == 0.0:
-        return "SHALLOW_CONT"          # direct RANGE->BULL, no crash
-    if dd <= SHALLOW_RECOV_CUTOFF:
-        return "SHALLOW_RECOV_DEEP"    # (-30%, -13%] — deep dip, historically losing
-    return "SHALLOW_RECOV_LIGHT"       # (-13%, 0%)   — shallow dip, historically winning
-
-
-def _cycle_trough_pct(
-    regime_arr,
-    close_arr,
-    entry_idx: int,
-    min_peak_bars: int = MIN_PEAK_BARS,
-    debug: bool = False,
-) -> float:
-    """
-    Walk backwards to find the last CONTIGUOUS BULL/RANGE block with
-    length >= min_peak_bars (default 48 = 2 days).
-
-      ref_price     = max(close[block_start : block_end+1])   # peak of block
-      trough_window = close[block_end+1   : entry_idx]        # gap after block
-
-    If trough_window is empty (block ends at entry-1), this is a direct
-    RANGE->BULL transition with no crash in between -> trough = 0.0 (SHALLOW_CONT).
-    Short blip blocks are skipped because MIN_PEAK_BARS=48 filters them out.
-    """
-    j = entry_idx - 1
-
-    while j >= 0:
-        # Skip non-peak bars
-        while j >= 0 and str(regime_arr[j]) not in PEAK_REGIMES:
-            j -= 1
-        if j < 0:
-            break
-
-        # Measure contiguous block
-        block_end = j
-        while j >= 0 and str(regime_arr[j]) in PEAK_REGIMES:
-            j -= 1
-        block_start = j + 1
-        block_len   = block_end - block_start + 1
-
-        if block_len >= min_peak_bars:
-            ref_price     = float(np.max(close_arr[block_start : block_end + 1]))
-            trough_window = close_arr[block_end + 1 : entry_idx]   # gap only
-
-            if len(trough_window) == 0 or ref_price <= 0:
-                trough = 0.0
-            else:
-                trough = round((float(np.min(trough_window)) / ref_price - 1.0) * 100, 2)
-
-            if debug:
-                print(
-                    f"  [trough] entry_idx={entry_idx} "
-                    f"block=[{block_start},{block_end}] block_len={block_len} "
-                    f"ref_price={ref_price:.2f} "
-                    f"trough={trough:.1f}%"
-                )
-            return trough, block_start, block_end
-
-    if debug:
-        print(f"  [trough] entry_idx={entry_idx}: no qualifying peak block -> 0.0")
-    return 0.0, -1, -1
 
 
 # ---------------------------------------------------------------------------

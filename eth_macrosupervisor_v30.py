@@ -51,7 +51,7 @@ from __future__ import annotations
 import argparse, json, os, sqlite3, sys, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-
+from eth_bull_classifer import _cycle_trough_pct, classify_bull_depth
 import numpy as np
 import pandas as pd
 
@@ -414,6 +414,7 @@ class MacroSupervisor:
         self._h1_regime5      = h["regime5"]
         self._h1_ts_index     = pd.to_datetime(h["ts"])
         self._h1_r5_series    = h["regime5"]
+        self._h1_close_arr    = h["close"].values   # needed by get_bull_class_at()
         self._persist_regime_transitions()
         self._write_regime_state_json()
         # v30: auto-export validated transitions CSV
@@ -448,213 +449,25 @@ class MacroSupervisor:
         except Exception:
             return "RANGE"
 
-    def record_trade(self, trade) -> None:
-        if hasattr(trade, "__dataclass_fields__"):
-            d = {
-                "session_id":     trade.session_id or self._session_id,
-                "bot_id":         trade.bot_id,
-                "preset":         trade.preset,
-                "regime":         trade.regime,
-                "entry_ts":       str(trade.entry_ts),
-                "exit_ts":        str(trade.exit_ts),
-                "entry_price":    trade.entry_price,
-                "exit_price":     trade.exit_price,
-                "qty":            trade.qty,
-                "reason":         trade.reason,
-                "pnl":            trade.pnl,
-                "pnl_after_fees": trade.pnl_after_fees,
-                "fees":           trade.fees,
-                "bars_held":      trade.bars_held,
-                "win":            int(trade.win),
-                "notes":          trade.notes,
-            }
-        else:
-            d = dict(trade)
-            d.setdefault("session_id", self._session_id)
-            d["win"] = int(d.get("win", False))
-        con = sqlite3.connect(self.db_path)
-        con.execute("""
-            INSERT INTO trades
-            (session_id,bot_id,preset,regime,entry_ts,exit_ts,entry_price,
-             exit_price,qty,reason,pnl,pnl_after_fees,fees,bars_held,win,notes)
-            VALUES
-            (:session_id,:bot_id,:preset,:regime,:entry_ts,:exit_ts,:entry_price,
-             :exit_price,:qty,:reason,:pnl,:pnl_after_fees,:fees,:bars_held,:win,:notes)
-        """, d)
-        con.commit()
-        con.close()
-
-    def record_snapshot(self, bot_id: str, equity: float,
-                        eth_held: float = 0.0, usdc_held: float = 0.0,
-                        cumulative_pnl: float = 0.0, ts: str = "") -> None:
-        ts = ts or datetime.now(timezone.utc).isoformat()
-        con = sqlite3.connect(self.db_path)
-        con.execute("""
-            INSERT INTO portfolio_snapshots
-            (session_id,ts,bot_id,equity,eth_held,usdc_held,cumulative_pnl)
-            VALUES (?,?,?,?,?,?,?)
-        """, (self._session_id, ts, bot_id, equity, eth_held, usdc_held, cumulative_pnl))
-        con.commit()
-        con.close()
-
-    def register_session(self, bot_id: str, config: dict) -> None:
-        con = sqlite3.connect(self.db_path)
-        con.execute("""
-            INSERT OR REPLACE INTO bot_sessions (session_id,bot_id,start_ts,config_json)
-            VALUES (?,?,?,?)
-        """, (self._session_id, bot_id,
-              datetime.now(timezone.utc).isoformat(), json.dumps(config)))
-        con.commit()
-        con.close()
-
-    def close_session(self, bot_id: str) -> None:
-        con = sqlite3.connect(self.db_path)
-        con.execute("UPDATE bot_sessions SET end_ts=? WHERE session_id=? AND bot_id=?",
-                    (datetime.now(timezone.utc).isoformat(), self._session_id, bot_id))
-        con.commit()
-        con.close()
-
-    def get_portfolio_report(self, bot_id: str = None,
-                              session_id: str = None) -> pd.DataFrame:
-        where, params = [], []
-        if bot_id:     where.append("bot_id = ?");     params.append(bot_id)
-        if session_id: where.append("session_id = ?"); params.append(session_id)
-        clause = ("WHERE " + " AND ".join(where)) if where else ""
-        con = sqlite3.connect(self.db_path)
-        df  = pd.read_sql_query(
-            f"SELECT * FROM trades {clause} ORDER BY exit_ts", con, params=params)
-        con.close()
-        return df
-
-    def get_regime_distribution(self) -> pd.DataFrame:
-        if self._h1_regime5 is None:
-            return pd.DataFrame()
-        vc = self._h1_regime5.value_counts()
-        return pd.DataFrame({
-            "regime":  vc.index,
-            "h1_bars": vc.values,
-            "days":    (vc.values / 24).round(1),
-            "pct":     (vc.values / self.total_h1_bars * 100).round(1)
-                       if self.total_h1_bars > 0 else 0,
-        }).sort_values("h1_bars", ascending=False).reset_index(drop=True)
-
-    def _build_transition_log(self, h: pd.DataFrame) -> None:
-        prev = None
-        for _, row in h.iterrows():
-            r5 = row["regime5"]
-            if r5 != prev:
-                self._regime_transitions.append({
-                    "session_id":   self._session_id,
-                    "ts":           str(row["ts"]),
-                    "from_regime":  prev or "INIT",
-                    "to_regime":    r5,
-                    "trigger":      "",
-                    "price":        float(row["close"]),
-                    "rsi":          float(row["rsi"]) if not pd.isna(row["rsi"]) else 0.0,
-                    "drawdown_pct": round(float(row["drawdown"]) * 100, 2),
-                })
-                prev = r5
-
-    def _persist_regime_transitions(self) -> None:
-        if not self._regime_transitions:
-            return
-        con = sqlite3.connect(self.db_path)
-        con.executemany("""
-            INSERT INTO regime_transitions
-            (session_id,ts,from_regime,to_regime,trigger,price,rsi,drawdown_pct)
-            VALUES
-            (:session_id,:ts,:from_regime,:to_regime,:trigger,:price,:rsi,:drawdown_pct)
-        """, self._regime_transitions)
-        con.commit()
-        con.close()
-
-    def _write_regime_state_json(self) -> None:
-        state = {
-            "session_id":   self._session_id,
-            "regime":       self.current_regime,
-            "macro_paused": bool(self.pause_events
-                                 and len(self.pause_events) > len(self.resume_events)),
-            "active_bots":  self.active_bot_ids,
-            "pause_events": len(self.pause_events),
-            "updated_at":   datetime.now(timezone.utc).isoformat(),
-        }
-        try:
-            with open(self.regime_json, "w") as f:
-                json.dump(state, f, indent=2)
-        except Exception:
-            pass
-
-    def summary(self) -> Dict[str, Any]:
-        pct = (self.total_pause_bars / self.total_h1_bars * 100
-               if self.total_h1_bars > 0 else 0)
-        rd  = [e for e in self.pause_events if e.get("trigger") == "rapid_descent"]
-        out = {
-            "session_id":                self._session_id,
-            "pause_events":              len(self.pause_events),
-            "rapid_descent_events":      len(rd),
-            "pause_days":                round(self.total_pause_bars / 24, 1),
-            "pause_pct":                 round(pct, 1),
-            "current_regime":            self.current_regime,
-            "db_path":                   self.db_path,
-            "bull_hold_bars":            self.bull_hold_bars,
-            "recovery_hold_bars":        self.recovery_hold_bars,
-            "rapid_descent_block_bars":  self.rapid_descent_block_bars,
-            "regime5_min_dwell_bars":    self.regime5_min_dwell_bars,
-            "correction_crash_floor":    self.correction_crash_floor,
-        }
-        if self._h1_regime5 is not None:
-            for r5 in ["BULL", "RANGE", "CORRECTION", "CRASH", "RECOVERY"]:
-                hrs = int((self._h1_regime5 == r5).sum())
-                out[f"regime5_{r5.lower()}_days"] = round(hrs / 24, 1)
-        return out
-
-    def print_report(self) -> None:
-        sep = " " + "-" * 62
-        print("\n MacroSupervisor v30 Report")
-        print(sep)
-        print(f" Session ID            : {self._session_id}")
-        print(f" bull_hold_bars        : {self.bull_hold_bars}  ({self.bull_hold_bars/24:.0f}d)")
-        print(f" recovery_hold_bars    : {self.recovery_hold_bars}  ({self.recovery_hold_bars/24:.0f}d)")
-        print(f" rapid_desc_block      : {self.rapid_descent_block_bars}  ({self.rapid_descent_block_bars/24:.0f}d)")
-        print(f" regime5_min_dwell     : {self.regime5_min_dwell_bars} h1 bars")
-        print(f" correction_crash_floor: -{self.correction_crash_floor*100:.0f}%")
-        print(f" Pause events          : {len(self.pause_events)}")
-        rd = [e for e in self.pause_events if e.get("trigger") == "rapid_descent"]
-        if rd:
-            print(f" rapid_descent         : {len(rd)}")
-        print(f" Total paused          : {self.total_pause_bars} h1 bars "
-              f"({self.total_pause_bars/24:.1f} days)")
-        if self.total_h1_bars > 0:
-            print(f" Fraction              : "
-                  f"{self.total_pause_bars/self.total_h1_bars*100:.1f}% of period")
-        if self.pause_events:
-            print("\n Pause periods:")
-            for i, pe in enumerate(self.pause_events):
-                re   = self.resume_events[i] if i < len(self.resume_events) else None
-                trig = pe.get("trigger", "drawdown")
-                chg  = (f", 24h={pe['chg_24h_pct']:.1f}%"
-                        if pe.get("chg_24h_pct") is not None else "")
-                if re:
-                    print(f"   [{i+1}] PAUSE  {str(pe['ts'])[:10]} @ "
-                          f"${pe['price']:,.0f}  (dd={pe['drawdown']:.1f}%, "
-                          f"RSI={pe['rsi']}, trig={trig}{chg})")
-                    print(f"        RESUME {str(re['ts'])[:10]} @ "
-                          f"${re['price']:,.0f}  (RSI={re['rsi']}, "
-                          f"{re['days_paused']}d)")
-                else:
-                    print(f"   [{i+1}] PAUSE  {str(pe['ts'])[:10]} @ "
-                          f"${pe['price']:,.0f}  (trig={trig}{chg}) -> active at end")
-        if self._h1_regime5 is not None:
-            print("\n Regime5 distribution:")
-            dist = self.get_regime_distribution()
-            print(f"  {'Regime':<14} {'Days':>6} {'Pct':>6}")
-            print("  " + "-" * 28)
-            for _, row in dist.iterrows():
-                print(f"  {row['regime']:<14} {row['days']:>6.1f} {row['pct']:>5.1f}%")
-        print(f"\n System of record  : {self.db_path}")
-        print(f" Transitions CSV   : {self._transitions_csv}")
-        print(sep)
-
+def get_bull_class_at(self, bar_idx: int) -> Optional[str]:
+    """
+    Return the BULL depth class for the BULL segment starting at bar_idx,
+    or None if bar_idx is not the first bar of a new BULL segment.
+    Requires apply_to_df() to have been called first.
+    Returns: "DEEP" | "SHALLOW_RECOV_LIGHT" | "SHALLOW_RECOV_DEEP" | "SHALLOW_CONT" | None
+    """
+    if self._h1_r5_series is None or not hasattr(self, "_h1_close_arr"):
+        return None
+    regime_arr = self._h1_r5_series.values
+    n = len(regime_arr)
+    if bar_idx <= 0 or bar_idx >= n:
+        return None
+    if str(regime_arr[bar_idx]) != "BULL":
+        return None
+    if str(regime_arr[bar_idx - 1]) == "BULL":
+        return None  # not the first bar of this segment
+    trough, _, _ = _cycle_trough_pct(regime_arr, self._h1_close_arr, bar_idx)
+    return classify_bull_depth(trough)
 
 def main():
     ap = argparse.ArgumentParser(description="MacroSupervisor v30 standalone")
