@@ -243,6 +243,7 @@ def run_backtest(
     active_stop_loss  = stop_loss if stop_loss is not None else 0.15
     skipped_this_bull = False
     skipped_at_bar    = -1
+    trough_block_start   = -1 
 
     prev_regime = str(regime_arr[0])
 
