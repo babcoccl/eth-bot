@@ -50,6 +50,14 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
             continue
 
         df_ind = prepare_indicators(df5, df1h)
+        sup = MacroSupervisor()
+        sup._compute_h1_signals(df1h)   # already called inside prepare_indicators,
+                                        # but call again here just for the log
+        transitions = sup.get_transition_log()
+        print(f"\n  [TRANSITIONS {w['label']}]")
+        for t in transitions:
+            print(f"    {t['ts']}  {t['from_regime']:<12}  "
+                f"price={t['price']:,.0f}  rsi={t['rsi']}  dd={t['drawdown_pct']}%")
         df_run = df_ind[df_ind["ts"] >= pd.Timestamp(start_dt)].reset_index(drop=True)
 
         if len(df_run) < 10:
@@ -175,9 +183,15 @@ def main():
     results_map = {}
 
     def _run(w):
-        tdf, s = run_window(args.symbol, w, args.capital, args.preset,
-                            args.max_hold_days)
-        return w, tdf, s
+        try:
+            tdf, s = run_window(args.symbol, w, args.capital,
+                                args.preset, args.max_hold_days)
+            return w, tdf, s
+        except Exception as exc:
+            import traceback
+            print(f"\n  [ERROR {w['label']}] {exc}")
+            traceback.print_exc()
+            return w, pd.DataFrame(), {}
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {ex.submit(_run, w): w for w in TREND_WINDOWS}

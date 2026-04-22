@@ -100,8 +100,13 @@ PRESETS = {
             "PARABOLIC": 1.0,
             "MODERATE":  0.5,           # half size on MODERATE — risk management only
         },
+        "trend_strength_allowed": {"STRONG", "PARABOLIC"},
         "buy_fee_pct":        0.00065,
         "sell_fee_pct":       0.00025,
+        "target_bps":        None,   # set to None to enable dynamic mode
+        "target_atr_mult":   1.5,    # target = entry_price * atr_pct * mult → converted to bps
+        "target_bps_min":    120,    # floor — never go below break-even buffer
+        "target_bps_max":    350,    # ceiling — cap runaway ATR spikes
     },
     "trendbot_v1_aggressive": {
         "base_qty":           0.05,
@@ -196,6 +201,7 @@ class TrendBot(BotInterface):
         zscore_max       = p.get("zscore_max", -0.3)
         uptrend_bars_min = p.get("uptrend_bars_min", 0)
         qty_scale_map    = p.get("qty_scale", {})
+        strength_allowed = set(p.get("trend_strength_allowed", {"STRONG", "PARABOLIC", "MODERATE"}))
 
         trend_streak = 0  # consecutive bars in BULL or RECOVERY
 
@@ -235,6 +241,10 @@ class TrendBot(BotInterface):
             # Gate on MacroSupervisor BULL or RECOVERY regime
             if regime5 not in _TREND_REGIMES:
                 continue
+            
+            strength = str(row.get("trend_strength", "STRONG"))  # move this read up
+            if strength not in strength_allowed:
+                continue
 
             # Require minimum consecutive trend bars before first entry
             if uptrend_bars_min > 0 and trend_streak < uptrend_bars_min:
@@ -265,8 +275,16 @@ class TrendBot(BotInterface):
                     and vol_r  >= vol_min):
                 strength      = str(row.get("trend_strength", "STRONG"))
                 effective_qty = base_qty * qty_scale_map.get(strength, 1.0)
+                if p.get("target_bps") is None:
+                    atr_pct = float(row.get("atr_pct", 0.005))
+                    raw_bps = int(atr_pct * p["target_atr_mult"] * 10_000)
+                    resolved_target = max(p["target_bps_min"],
+                                        min(p["target_bps_max"], raw_bps))
+                else:
+                    resolved_target = p["target_bps"]
+
                 self._buy(i, df, close, "uptrend_pb", effective_qty,
-                          buy_fee_pct, target_bps, min_profit, sell_fee_pct)
+                          buy_fee_pct, resolved_target, min_profit, sell_fee_pct)
 
         if self._position.is_open:
             self._sell(len(df) - 1, df, float(df.iloc[-1]["close"]),
@@ -310,6 +328,7 @@ class TrendBot(BotInterface):
                                    fee=fee, ts=row["ts"],
                                    row_idx=len(self._trades))]
         self._last_buy_ts = row["ts"]
+        self._position.target_bps = target_bps
 
         self._trades.append({
             "ts":       row["ts"],

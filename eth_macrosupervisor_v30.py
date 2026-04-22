@@ -579,6 +579,10 @@ class MacroSupervisor:
             return None  # not the first bar of this segment
         trough, _, _ = _cycle_trough_pct(regime_arr, self._h1_close_arr, bar_idx)
         return classify_bull_depth(trough)
+    
+    def get_transition_log(self) -> list:
+        """Return the regime transition log built during _compute_h1_signals."""
+        return getattr(self, "_regime_transitions", [])
 
 def main():
     ap = argparse.ArgumentParser(description="MacroSupervisor v30 standalone")
