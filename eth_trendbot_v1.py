@@ -63,6 +63,12 @@ v1 history:
              Root cause of CyA/CyB losses is regime-hostile windows (10%/29%
              tradeable), not entry timing. Fix is harness window selection,
              not TrendBot parameter tuning.
+ r5       — entry_min_atr_pct = 0.008 added. Filters STRONG entries in
+             low-ATR regimes (T03/T04/T05 avg 0.5% ATR) while preserving
+             high-ATR STRONG windows (T12 avg 1.2%) and all PARABOLIC windows.
+             trend_strength_allowed restored to {"STRONG", "PARABOLIC"}.
+             Hypothesis: PSL rate will drop as low-ATR entries that reverse
+             sharply within 15 bars are suppressed at the entry gate.
 """
 
 import warnings
@@ -79,11 +85,11 @@ PRESETS = {
         "base_qty":           0.05,
         "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
         "uptrend_rsi_max":    38,
-        "vol_mult_min":       1.10,
+        "vol_mult_min":       1.30,
         "cooldown_secs":      14400,
         "psl_cooldown_secs":  28800,     # 2h lockout after any stop-loss exit
         "min_profit_bps":     100,
-        "zscore_max":        -1.2,
+        "zscore_max":        -1.5,
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "macro_context_bars":  2880,   # 10 days of 5m bars (10d * 24h * 12 bars)
         "macro_bearish_max":   0.65,   # skip if >55% of last 10d was CRASH/CORRECTION
@@ -94,7 +100,7 @@ PRESETS = {
             "PARABOLIC": 1.0,
             "MODERATE":  0.5,           # half size on MODERATE — risk management only
         },
-        "trend_strength_allowed": {"STRONG", "PARABOLIC"},
+        "trend_strength_allowed": {"STRONG","PARABOLIC"},
         "buy_fee_pct":        0.00065,
         "sell_fee_pct":       0.00025,
         "target_bps":        None,   # set to None to enable dynamic mode
@@ -322,6 +328,20 @@ class TrendBot(BotInterface):
             entry_rsi_min = p.get("entry_rsi_min", 0)
             if rsi < entry_rsi_min:
                 continue
+            
+            # ── ATR floor filter ─────────────────────────────────────────────
+            # Require ATR% at entry exceeds threshold. Filters low-volatility
+            # STRONG windows (T03/T04/T05 ~0.5% ATR) while passing high-ATR
+            # STRONG windows (T12 ~1.2% ATR) and PARABOLIC windows.
+            # Hypothesis: STRONG entries in low-ATR environments stagnate and
+            # time_stop repeatedly; high-ATR environments have enough velocity
+            # to reach target within the hold window.
+            entry_min_atr_pct = p.get("entry_min_atr_pct", 0.0)
+            if entry_min_atr_pct > 0.0:
+                entry_atr = float(row.get("atr_pct", 0.0))
+                if entry_atr < entry_min_atr_pct:
+                    continue
+            # ─────────────────────────────────────────────────────────────────
 
             # Require RSI was above 50 within the last 8 bars — confirms pullback, not breakdown
             rsi_lookback = df["rsi"].iloc[max(0, i-24):i]
