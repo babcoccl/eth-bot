@@ -87,8 +87,8 @@ PRESETS = {
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "macro_context_bars":  2880,   # 10 days of 5m bars (10d * 24h * 12 bars)
         "macro_bearish_max":   0.65,   # skip if >55% of last 10d was CRASH/CORRECTION
-        "time_stop_bars":     48,    # exit flat if no progress after 4h (48 * 5m bars)
-        "time_stop_min_pct":  0.003, # only apply if position is below +0.3% (not already running)
+        "time_stop_bars":     24,    # exit flat if no progress after 4h (24 * 5m bars)
+        "time_stop_min_pct":  0.0, # only apply if position is below +0.0% (not already running)
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
