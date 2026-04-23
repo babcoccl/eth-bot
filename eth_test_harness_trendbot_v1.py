@@ -66,6 +66,13 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
         print(f"  [regime dist] {window['label']}: tradeable={tradeable_pct:.1%} "
               f"| {', '.join(f'{k}={v:.1%}' for k, v in sorted(regime_dist.items()))}")
         
+        bull_recov_pct = (
+            (df_run["regime5"].isin(["BULL", "RECOVERY"])).sum() / len(df_run)
+        )
+        if bull_recov_pct < 0.20:
+            print(f"  [{window['label']}]  skipped (bull_recov_pct={bull_recov_pct:.1%} < 20%)")
+            return window["label"], pd.DataFrame(), {}
+
         # Inject window-level trend strength so qty_scale in the bot can act on it
         df_run["window_strength"] = window["strength"]
 
