@@ -88,11 +88,11 @@ PRESETS = {
         "base_qty":           0.05,
         "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
         "uptrend_rsi_max":    44,
-        "vol_mult_min":       0.80,
-        "cooldown_secs":      1800,
+        "vol_mult_min":       1.10,
+        "cooldown_secs":      3600,
         "psl_cooldown_secs":  7200,     # 2h lockout after any stop-loss exit
         "min_profit_bps":     100,
-        "zscore_max":        -0.6,
+        "zscore_max":        -0.8,
         "uptrend_bars_min":   0,        # reverted from 48 — see docstring rationale
         "qty_scale": {
             "STRONG":    1.0,
@@ -231,7 +231,9 @@ class TrendBot(BotInterface):
                 ATR_PSL_MULT  = 1.5    # tune alongside target_atr_mult
                 MAX_PSL_PCT   = 0.07   # hard cap — never wider than 7%
 
-                atr_pct_now   = float(df["atr_pct"].iat[i]) if not pd.isna(df["atr_pct"].iat[i]) else psl_pct
+                atr_pct_now   = (self._position.entry_atr_pct
+                                 if hasattr(self._position, "entry_atr_pct")
+                                 else float(df["atr_pct"].iat[i]))
                 atr_psl       = atr_pct_now * ATR_PSL_MULT
                 effective_psl = min(atr_psl, MAX_PSL_PCT)
 
@@ -252,6 +254,8 @@ class TrendBot(BotInterface):
 
             # ── SCAN FOR ENTRY (position flat) ───────────────────────
             # Gate on MacroSupervisor BULL or RECOVERY regime
+            rsi_prev2 = float(df["rsi"].iloc[i-2]) if i >= 2 and not pd.isna(df["rsi"].iloc[i-2]) else rsi_prev
+
             if regime5 not in _TREND_REGIMES:
                 continue
 
@@ -292,8 +296,15 @@ class TrendBot(BotInterface):
             if rsi < entry_rsi_min:
                 continue
 
+            # Require RSI was above 50 within the last 8 bars — confirms pullback, not breakdown
+            rsi_lookback = df["rsi"].iloc[max(0, i-24):i]
+            if rsi_lookback.empty or rsi_lookback.max() < 55:
+                continue
+
+            rsi_turning_up = (rsi > rsi_prev) and (rsi_prev < rsi_prev2)
+
             if (rsi      < rsi_max
-                    and rsi    < rsi_prev
+                    and rsi_turning_up
                     and zscore < zscore_max
                     and vol_r  >= vol_min):
                 strength      = str(row.get("window_strength", "STRONG"))
@@ -347,6 +358,7 @@ class TrendBot(BotInterface):
         self._position.peak_price = close
         self._position.entry_bar  = i
         self._position.bull_class = str(row.get("bull_class_h1", ""))
+        self._position.entry_atr_pct = float(row.get("atr_pct", 0.005))
         self._position.lots = [Lot(qty=qty, price=close,
                                    fee=fee, ts=row["ts"],
                                    row_idx=len(self._trades))]

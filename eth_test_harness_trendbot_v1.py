@@ -52,11 +52,6 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
 
         df_ind = prepare_indicators(df5, df1h, min_dwell=min_dwell)
 
-        transitions = sup.get_transition_log()
-        print(f"\n  [TRANSITIONS {window['label']}]")
-        for t in transitions:
-            print(f"    {t['ts']}  {t['from_regime']:<12}  "
-                f"price={t['price']:,.0f}  rsi={t['rsi']}  dd={t['drawdown_pct']}%")
         df_run = df_ind[df_ind["ts"] >= pd.Timestamp(start_dt)].reset_index(drop=True)
 
         if len(df_run) < 10:
