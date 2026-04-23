@@ -296,7 +296,7 @@ def prepare_indicators(df5, df1h):
                   f"(first at row {result[col].isna().idxmax()})")
 
     # ── BULL depth class (forward-filled from h1 BULL entry bars) ────────────
-    sup = MacroSupervisor()
+    sup = MacroSupervisor(regime5_min_dwell_bars=min_dwell)
     h   = sup._compute_h1_signals(df1h)          # no file I/O side effects
     regime_arr = h["regime5"].values
     close_arr  = h["close"].values

@@ -33,7 +33,7 @@ from trend_windows_4yr import TREND_WINDOWS
 MAX_DATE_SHIFTS = 3
 
 
-def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=30):
+def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=30, min_dwell=3):
     p          = PRESETS[preset_name]
     base_start = datetime.strptime(window["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
     trend_end  = datetime.strptime(window["end"],   "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -50,10 +50,9 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
         if df5 is None or len(df5) < 50:
             continue
 
-        df_ind = prepare_indicators(df5, df1h)
-        sup = MacroSupervisor()
-        sup._compute_h1_signals(df1h)   # already called inside prepare_indicators,
-                                        # but call again here just for the log
+        df_ind = prepare_indicators(df5, df1h, min_dwell=min_dwell)
+        sup = MacroSupervisor(regime5_min_dwell_bars=min_dwell)
+
         transitions = sup.get_transition_log()
         print(f"\n  [TRANSITIONS {window['label']}]")
         for t in transitions:
@@ -68,7 +67,7 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
             print(f"    [shift+{shift}d] {window['label']} resolved at {start_dt.date()}")
 
         # Inject window-level trend strength so qty_scale in the bot can act on it
-        df_run["trend_strength"] = window["strength"]
+        df_run["window_strength"] = window["strength"]
 
         bot = TrendBot(symbol=symbol.replace("/", "-"))
         return bot.run_backtest(df_run, p, capital, preset_name)
@@ -170,6 +169,8 @@ def main():
     ap.add_argument("--max-hold-days", default=60, type=int)
     ap.add_argument("--workers",       default=4, type=int)
     ap.add_argument("--no-cache",      action="store_true")
+    ap.add_argument("--min-dwell", default=3, type=int,
+                help="regime5_min_dwell_bars passed to MacroSupervisor (default 3)")
     args = ap.parse_args()
 
     if args.no_cache:
@@ -186,7 +187,8 @@ def main():
     def _run(w):
         try:
             tdf, s = run_window(args.symbol, w, args.capital,
-                                args.preset, args.max_hold_days)
+                                args.preset, args.max_hold_days, 
+                                min_dwell=args.min_dwell)
             return w, tdf, s
         except Exception as exc:
             import traceback

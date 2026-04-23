@@ -261,7 +261,7 @@ class TrendBot(BotInterface):
                 if macro_dd < macro_dd_skip:
                     continue
             
-            strength = str(row.get("trend_strength", "STRONG"))  # move this read up
+            strength = str(row.get("window_strength", "STRONG"))  # move this read up
             if strength not in strength_allowed:
                 continue
 
@@ -296,7 +296,7 @@ class TrendBot(BotInterface):
                     and rsi    < rsi_prev
                     and zscore < zscore_max
                     and vol_r  >= vol_min):
-                strength      = str(row.get("trend_strength", "STRONG"))
+                strength      = str(row.get("window_strength", "STRONG"))
                 effective_qty = base_qty * qty_scale_map.get(strength, 1.0)
                 if p.get("target_bps") is None:
                     atr_pct = float(row.get("atr_pct", 0.005))
