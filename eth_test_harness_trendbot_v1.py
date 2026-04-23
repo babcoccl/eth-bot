@@ -69,8 +69,8 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
         bull_recov_pct = (
             (df_run["regime5"].isin(["BULL", "RECOVERY"])).sum() / len(df_run)
         )
-        if bull_recov_pct < 0.20:
-            print(f"  [{window['label']}]  skipped (bull_recov_pct={bull_recov_pct:.1%} < 20%)")
+        if bull_recov_pct < 0.30:
+            print(f"  [{window['label']}]  skipped (bull_recov_pct={bull_recov_pct:.1%} < 30%)")
             return window["label"], pd.DataFrame(), {}
 
         # Inject window-level trend strength so qty_scale in the bot can act on it

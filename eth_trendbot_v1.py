@@ -86,7 +86,7 @@ PRESETS = {
         "zscore_max":        -1.2,
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "macro_context_bars":  2880,   # 10 days of 5m bars (10d * 24h * 12 bars)
-        "macro_bearish_max":   0.55,   # skip if >55% of last 10d was CRASH/CORRECTION
+        "macro_bearish_max":   0.65,   # skip if >55% of last 10d was CRASH/CORRECTION
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
