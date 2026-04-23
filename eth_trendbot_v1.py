@@ -87,6 +87,8 @@ PRESETS = {
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "macro_context_bars":  2880,   # 10 days of 5m bars (10d * 24h * 12 bars)
         "macro_bearish_max":   0.65,   # skip if >55% of last 10d was CRASH/CORRECTION
+        "time_stop_bars":     48,    # exit flat if no progress after 4h (48 * 5m bars)
+        "time_stop_min_pct":  0.003, # only apply if position is below +0.3% (not already running)
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -231,6 +233,18 @@ class TrendBot(BotInterface):
                     effective_psl = min(atr_psl, max_psl_pct)
                 else:
                     effective_psl = p.get("pos_stop_loss_pct", 0.025)  # fixed-pct fallback
+                
+                # ── Time stop: exit flat if position stagnating ──────────────────
+                time_stop_bars = p.get("time_stop_bars", 0)
+                if time_stop_bars > 0:
+                    bars_in_trade = i - self._position.entry_bar
+                    if bars_in_trade >= time_stop_bars:
+                        min_progress = p.get("time_stop_min_pct", 0.003)
+                        progress = (close - self._position.avg_entry) / self._position.avg_entry
+                        if progress < min_progress:
+                            self._sell(i, df, close, "time_stop", sell_fee_pct)
+                            continue
+                # ─────────────────────────────────────────────────────────────────
                 
                 # Still allow bull_class override if it's tighter
                 if bull_cls and bull_cls in STOP_LOSS_BY_CLASS:
