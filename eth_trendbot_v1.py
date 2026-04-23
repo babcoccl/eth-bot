@@ -102,7 +102,7 @@ PRESETS = {
         "target_bps_min":    120,    # floor — never go below break-even buffer
         "target_bps_max":    350,    # ceiling — cap runaway ATR spikes
         "psl_atr_max":       0.07,   # hard cap — never wider than 7%
-        "manage_psl_mult":   2.0,    # (position management PSL width)
+        "manage_psl_mult":   3.0,    # (position management PSL width)
         "psl_atr_mult":      1.5,    # PSL = atr_pct * mult, subject to psl_atr_max cap and bull_class overrides
         "macro_dd_skip":     -0.20,   # skip entries if ETH is >20% below 90d high    
         "entry_rsi_min":     30,   # don't enter if RSI has already collapsed — stale BULL signal
@@ -245,7 +245,7 @@ class TrendBot(BotInterface):
                             self._sell(i, df, close, "time_stop", sell_fee_pct)
                             continue
                 # ─────────────────────────────────────────────────────────────────
-                
+
                 # Still allow bull_class override if it's tighter
                 if bull_cls and bull_cls in STOP_LOSS_BY_CLASS:
                     effective_psl = min(effective_psl, STOP_LOSS_BY_CLASS[bull_cls])
