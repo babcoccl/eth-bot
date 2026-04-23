@@ -254,7 +254,7 @@ class TrendBot(BotInterface):
 
             # ── SCAN FOR ENTRY (position flat) ───────────────────────
             # Gate on MacroSupervisor BULL or RECOVERY regime
-            rsi_prev2 = float(df["rsi"].iloc[i-2]) if i >= 2 and not pd.isna(df["rsi"].iloc[i-2]) else rsi_prev
+           
 
             if regime5 not in _TREND_REGIMES:
                 continue
@@ -281,6 +281,7 @@ class TrendBot(BotInterface):
             rsi_prev = float(row.get("rsi_prev", 50))
             zscore   = float(row.get("zscore", 0))
             vol_r    = float(row.get("vol_ratio", 1))
+            rsi_prev2 = float(df["rsi"].iloc[i-2]) if i >= 2 and not pd.isna(df["rsi"].iloc[i-2]) else rsi_prev
 
             in_cooldown = (self._last_buy_ts is not None and
                            (ts - self._last_buy_ts).total_seconds() < cooldown)
