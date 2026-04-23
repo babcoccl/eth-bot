@@ -87,12 +87,12 @@ PRESETS = {
     "trendbot_v1": {
         "base_qty":           0.05,
         "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
-        "uptrend_rsi_max":    44,
+        "uptrend_rsi_max":    38,
         "vol_mult_min":       1.10,
-        "cooldown_secs":      3600,
-        "psl_cooldown_secs":  7200,     # 2h lockout after any stop-loss exit
+        "cooldown_secs":      14400,
+        "psl_cooldown_secs":  28800,     # 2h lockout after any stop-loss exit
         "min_profit_bps":     100,
-        "zscore_max":        -0.8,
+        "zscore_max":        -1.2,
         "uptrend_bars_min":   0,        # reverted from 48 — see docstring rationale
         "qty_scale": {
             "STRONG":    1.0,
@@ -228,7 +228,7 @@ class TrendBot(BotInterface):
                 unreal = (close - self._position.avg_entry) / self._position.avg_entry
 
                 bull_cls = self._position.bull_class
-                ATR_PSL_MULT  = 1.5    # tune alongside target_atr_mult
+                ATR_PSL_MULT  = 3.0    # tune alongside target_atr_mult
                 MAX_PSL_PCT   = 0.07   # hard cap — never wider than 7%
 
                 atr_pct_now   = (self._position.entry_atr_pct
