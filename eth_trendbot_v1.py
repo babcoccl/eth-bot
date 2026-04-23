@@ -94,6 +94,7 @@ PRESETS = {
         "min_profit_bps":     100,
         "zscore_max":        -1.2,
         "uptrend_bars_min":   0,        # reverted from 48 — see docstring rationale
+        "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -258,6 +259,15 @@ class TrendBot(BotInterface):
 
             if regime5 not in _TREND_REGIMES:
                 continue
+
+            # ── NEW: regime stability filter ─────────────────────────────────
+            # Require regime has been continuously BULL/RECOVERY for at least
+            # regime_stable_bars 5m bars (~N h1 bars * 12 bars/h1) before entry.
+            # Filters out "first bar after CRASH flip" false positives.
+            regime_stable_bars = p.get("regime_stable_bars", 0)
+            if regime_stable_bars > 0 and trend_streak < regime_stable_bars:
+                continue
+            # ─────────────────────────────────────────────────────────────────
 
             macro_dd_skip = p.get("macro_dd_skip", None)
             if macro_dd_skip is not None:
