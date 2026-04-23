@@ -18,6 +18,7 @@ Notes:
   - Parquet cache shared with other bots (ohlcv_cache/).
 """
 
+from curses import window
 import argparse, sys, os, warnings
 from eth_macrosupervisor_v30 import MacroSupervisor
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -77,9 +78,10 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
         df_run["window_strength"] = window["strength"]
 
         bot = TrendBot(symbol=symbol.replace("/", "-"))
-        return bot.run_backtest(df_run, p, capital, preset_name)
+        tdf, s = bot.run_backtest(df_run, p, capital, preset_name)
+        return window["label"], tdf, s
 
-    return pd.DataFrame(), {}
+    return window["label"], pd.DataFrame(), {}
 
 
 def print_results(results, capital, preset_name):
@@ -193,9 +195,9 @@ def main():
 
     def _run(w):
         try:
-            tdf, s = run_window(args.symbol, w, args.capital,
-                                args.preset, args.max_hold_days, 
-                                min_dwell=args.min_dwell)
+            label, tdf, s = run_window(args.symbol, w, args.capital,
+                            args.preset, args.max_hold_days,
+                            min_dwell=args.min_dwell)
             return w, tdf, s
         except Exception as exc:
             import traceback
