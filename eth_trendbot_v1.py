@@ -85,6 +85,8 @@ PRESETS = {
         "min_profit_bps":     100,
         "zscore_max":        -1.2,
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
+        "macro_context_bars":  2880,   # 10 days of 5m bars (10d * 24h * 12 bars)
+        "macro_bearish_max":   0.55,   # skip if >55% of last 10d was CRASH/CORRECTION
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -255,6 +257,18 @@ class TrendBot(BotInterface):
             regime_stable_bars = p.get("regime_stable_bars", 0)
             if regime_stable_bars > 0 and trend_streak < regime_stable_bars:
                 continue
+            # ─────────────────────────────────────────────────────────────────
+
+            # ── Macro context filter ──────────────────────────────────────────
+            # If the broader regime context is dominated by CRASH/CORRECTION,
+            # this is a relief rally, not a genuine trend. Suppress entry.
+            macro_lookback = p.get("macro_context_bars", 0)   # in 5m bars; 0 = disabled
+            if macro_lookback > 0:
+                recent = df["regime5"].iloc[max(0, i - macro_lookback):i]
+                bearish_frac = recent.isin(["CRASH", "CORRECTION"]).sum() / len(recent)
+                macro_bearish_max = p.get("macro_bearish_max", 0.60)
+                if bearish_frac > macro_bearish_max:
+                    continue
             # ─────────────────────────────────────────────────────────────────
 
             macro_dd_skip = p.get("macro_dd_skip", None)
