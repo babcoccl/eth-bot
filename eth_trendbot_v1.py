@@ -29,15 +29,6 @@ PSL sizing rationale (empirical, not overfit):
                                CyA/CyB were regime-hostile — see harness notes)
   Derived from integration harness exit breakdown, not overfit to windows.
 
-uptrend_bars_min rationale:
-  Tested at 48 (4h) — made CyA/CyB outcomes worse, not better.
-  Hypothesis: early-recovery entries are lower quality.
-  Result: WRONG for compressed RECOVERY windows. When the entire eligible
-  window is short (CyA 10.6% tradeable), filtering the first 4h removes
-  the highest-momentum entries and leaves only choppy tail entries.
-  Reverted to 0. Will re-evaluate only on windows with Tradeable% >= 25%.
-  Set to 0 in both presets until evidence supports a non-zero value.
-
 psl_cooldown_secs:
   After a pos_stop_loss exit, the bot locks out new entries for this duration.
   Prevents re-entering a choppy/reversing regime immediately after being stopped out.
@@ -93,7 +84,6 @@ PRESETS = {
         "psl_cooldown_secs":  28800,     # 2h lockout after any stop-loss exit
         "min_profit_bps":     100,
         "zscore_max":        -1.2,
-        "uptrend_bars_min":   0,        # reverted from 48 — see docstring rationale
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "qty_scale": {
             "STRONG":    1.0,
@@ -122,7 +112,6 @@ PRESETS = {
         "psl_cooldown_secs":  3600,
         "min_profit_bps":     120,
         "zscore_max":        -0.5,
-        "uptrend_bars_min":   0,
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -203,7 +192,6 @@ class TrendBot(BotInterface):
         psl_cooldown     = p.get("psl_cooldown_secs", cooldown)
         min_profit       = p.get("min_profit_bps", 0)
         zscore_max       = p.get("zscore_max", -0.3)
-        uptrend_bars_min = p.get("uptrend_bars_min", 0)
         qty_scale_map    = p.get("qty_scale", {})
         strength_allowed = set(p.get("trend_strength_allowed", {"STRONG", "PARABOLIC", "MODERATE"}))
 
@@ -277,10 +265,6 @@ class TrendBot(BotInterface):
             
             strength = str(row.get("window_strength", "STRONG"))  # move this read up
             if strength not in strength_allowed:
-                continue
-
-            # Require minimum consecutive trend bars before first entry
-            if uptrend_bars_min > 0 and trend_streak < uptrend_bars_min:
                 continue
 
             _rsi_raw = df["rsi"].iat[i]
