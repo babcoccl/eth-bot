@@ -18,7 +18,6 @@ Notes:
   - Parquet cache shared with other bots (ohlcv_cache/).
 """
 
-from curses import window
 import argparse, sys, os, warnings
 from eth_macrosupervisor_v30 import MacroSupervisor
 from concurrent.futures import ThreadPoolExecutor, as_completed

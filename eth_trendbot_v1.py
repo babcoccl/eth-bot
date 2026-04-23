@@ -100,6 +100,7 @@ PRESETS = {
         "target_bps_min":    120,    # floor — never go below break-even buffer
         "target_bps_max":    350,    # ceiling — cap runaway ATR spikes
         "psl_atr_max":       0.07,   # hard cap — never wider than 7%
+        "manage_psl_mult":   2.0,    # (position management PSL width)
         "psl_atr_mult":      1.5,    # PSL = atr_pct * mult, subject to psl_atr_max cap and bull_class overrides
         "macro_dd_skip":     -0.20,   # skip entries if ETH is >20% below 90d high    
         "entry_rsi_min":     30,   # don't enter if RSI has already collapsed — stale BULL signal
@@ -219,15 +220,18 @@ class TrendBot(BotInterface):
                 unreal = (close - self._position.avg_entry) / self._position.avg_entry
 
                 bull_cls = self._position.bull_class
-                ATR_PSL_MULT  = 3.0    # tune alongside target_atr_mult
-                MAX_PSL_PCT   = 0.07   # hard cap — never wider than 7%
+                manage_psl_mult = p.get("manage_psl_mult", 3.0)   # default=3.0 preserves existing behavior
+                max_psl_pct     = p.get("psl_atr_max", 0.07)
 
                 atr_pct_now   = (self._position.entry_atr_pct
-                                 if hasattr(self._position, "entry_atr_pct")
-                                 else float(df["atr_pct"].iat[i]))
-                atr_psl       = atr_pct_now * ATR_PSL_MULT
-                effective_psl = min(atr_psl, MAX_PSL_PCT)
-
+                                if hasattr(self._position, "entry_atr_pct")
+                                else float(df["atr_pct"].iat[i]))
+                if atr_pct_now > 0:
+                    atr_psl = atr_pct_now * manage_psl_mult
+                    effective_psl = min(atr_psl, max_psl_pct)
+                else:
+                    effective_psl = p.get("pos_stop_loss_pct", 0.025)  # fixed-pct fallback
+                
                 # Still allow bull_class override if it's tighter
                 if bull_cls and bull_cls in STOP_LOSS_BY_CLASS:
                     effective_psl = min(effective_psl, STOP_LOSS_BY_CLASS[bull_cls])
