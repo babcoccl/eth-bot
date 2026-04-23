@@ -51,7 +51,6 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=
             continue
 
         df_ind = prepare_indicators(df5, df1h, min_dwell=min_dwell)
-        sup = MacroSupervisor(regime5_min_dwell_bars=min_dwell)
 
         transitions = sup.get_transition_log()
         print(f"\n  [TRANSITIONS {window['label']}]")

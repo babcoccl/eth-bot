@@ -244,7 +244,7 @@ def _fetch_ohlcv_live(symbol, timeframe, since_dt, until_dt):
 
 # ── Feature engineering ───────────────────────────────────────────────────────
 
-def prepare_indicators(df5, df1h):
+def prepare_indicators(df5, df1h, min_dwell=3):
     """
     Join 5m OHLCV with computed indicators and h1 regime label.
 
