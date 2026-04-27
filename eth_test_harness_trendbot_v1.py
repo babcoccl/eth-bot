@@ -19,6 +19,9 @@ Notes:
   - Same try_shifts retry logic as CorrectionBot harness (up to 3d shift).
   - Parquet cache shared with other bots (ohlcv_cache/).
   - Runtime gate matches generator qualifiers: bull_recov>=40%, hostile<=40%.
+  - lookback=180d: MacroSupervisor needs ~180d of history before window start
+    for peak_window (720 h1 bars=30d), EMA, and RSI to be properly warmed up.
+    Using 30d caused cold-start misclassification (everything showed as CRASH).
 """
 
 import argparse, sys, os, warnings
@@ -39,8 +42,17 @@ MAX_DATE_SHIFTS = 3
 _MIN_BULL_RECOV_PCT = 0.40
 _MAX_HOSTILE_PCT    = 0.40
 
+# Warmup days before each window start.
+# MacroSupervisor needs at minimum:
+#   peak_window    = 720 h1 bars = 30d  (rolling peak for drawdown calc)
+#   EMA slow       = 50 h1 bars  ~  2d  (but needs history to stabilize)
+#   min_pause_bars = 336 h1 bars = 14d  (minimum pause duration)
+# 180d gives a comfortable buffer so regime5 is accurate from bar one.
+_LOOKBACK_DAYS = 180
 
-def run_window(symbol, window, capital, preset_name, max_hold_days=60, lookback=30, min_dwell=3):
+
+def run_window(symbol, window, capital, preset_name, max_hold_days=60,
+              lookback=_LOOKBACK_DAYS, min_dwell=3):
     p          = PRESETS[preset_name]
     base_start = datetime.strptime(window["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
     trend_end  = datetime.strptime(window["end"],   "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -191,10 +203,12 @@ def main():
     ap.add_argument("--capital",       default=400.0, type=float)
     ap.add_argument("--preset",        default="trendbot_v1",
                     choices=list(PRESETS.keys()))
-    ap.add_argument("--max-hold-days", default=60, type=int)
-    ap.add_argument("--workers",       default=4, type=int)
+    ap.add_argument("--max-hold-days", default=60,             type=int)
+    ap.add_argument("--lookback",      default=_LOOKBACK_DAYS, type=int,
+                    help=f"Warmup days before window start (default: {_LOOKBACK_DAYS})")
+    ap.add_argument("--workers",       default=4,              type=int)
     ap.add_argument("--no-cache",      action="store_true")
-    ap.add_argument("--min-dwell",     default=3, type=int,
+    ap.add_argument("--min-dwell",     default=3,              type=int,
                     help="regime5_min_dwell_bars passed to MacroSupervisor (default 3)")
     args = ap.parse_args()
 
@@ -205,7 +219,7 @@ def main():
     print(f"TrendBot v1 Tests")
     print(f"=" * 60)
     print(f"Running {len(TREND_WINDOWS)} TREND windows "
-          f"(max hold {args.max_hold_days}d, workers={args.workers})...")
+          f"(max hold {args.max_hold_days}d, lookback={args.lookback}d, workers={args.workers})...")
 
     results_map = {}
 
@@ -213,6 +227,7 @@ def main():
         try:
             label, tdf, s = run_window(args.symbol, w, args.capital,
                             args.preset, args.max_hold_days,
+                            lookback=args.lookback,
                             min_dwell=args.min_dwell)
             return w, tdf, s
         except Exception as exc:
