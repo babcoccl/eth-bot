@@ -53,6 +53,9 @@ _MAX_HOSTILE_PCT    = 0.40
 # 180d gives a comfortable buffer so regime5 is accurate from bar one.
 _LOOKBACK_DAYS = 180
 
+# Per-window PSL rate threshold for the high-PSL warning
+_HIGH_PSL_RATE = 0.30
+
 
 def run_window(symbol, window, capital, preset_name, max_hold_days=60,
               lookback=_LOOKBACK_DAYS, min_dwell=3):
@@ -93,14 +96,26 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60,
             print(f"  [{window['label']}]  skipped (too few bars in trend window)")
             return window["label"], pd.DataFrame(), {}
 
+        # 5m regime distribution (gate check)
         regime_dist    = df_gate["regime5"].value_counts(normalize=True).to_dict()
         tradeable_pct  = regime_dist.get("BULL", 0) + regime_dist.get("RECOVERY", 0)
         bull_recov_pct = tradeable_pct
         hostile_pct    = regime_dist.get("CRASH", 0) + regime_dist.get("CORRECTION", 0)
 
-        print(f"  [regime dist] {window['label']}: tradeable={tradeable_pct:.1%} "
+        print(f"  [regime dist 5m ] {window['label']}: tradeable={tradeable_pct:.1%} "
               f"hostile={hostile_pct:.1%} "
               f"| {', '.join(f'{k}={v:.1%}' for k, v in sorted(regime_dist.items()))}")
+
+        # h1 regime distribution (entry gate diagnostic)
+        # TrendBot requires h1 UPTREND to enter -- if h1 is rarely UPTREND even
+        # when 5m is BULL/RECOVERY, the bot will produce zero trades.
+        if "regime_h1" in df_gate.columns:
+            h1_dist        = df_gate["regime_h1"].value_counts(normalize=True).to_dict()
+            h1_uptrend_pct = h1_dist.get("UPTREND", 0)
+            print(f"  [regime dist h1 ] {window['label']}: uptrend={h1_uptrend_pct:.1%} "
+                  f"| {', '.join(f'{k}={v:.1%}' for k, v in sorted(h1_dist.items()))}")
+        else:
+            print(f"  [regime dist h1 ] {window['label']}: column 'regime_h1' not found in df_gate")
 
         if bull_recov_pct < _MIN_BULL_RECOV_PCT:
             print(f"  [{window['label']}]  skipped "
@@ -129,7 +144,7 @@ def print_results(results, capital, preset_name):
     print(f" TrendBot v1 -- {preset_name} -- per-window results")
     print(sep)
     print(f"  {'Window':<18} {'Days':>5} {'Str':<10} {'Trades':>6} {'WR%':>6} "
-          f"{'PSL':>4} {'TGT':>4} {'PnL':>9}")
+          f"{'PSL':>4} {'PSL%':>5} {'TGT':>4} {'PnL':>9}")
     print(f"  {sep2[:78]}")
 
     h_rows = []
@@ -138,14 +153,19 @@ def print_results(results, capital, preset_name):
             print(f"  {w['label']:<18}  -- no data --")
             continue
 
-        trades  = s.get("trades", 0)
-        wr      = s.get("win_rate", 0)
-        psl     = s.get("psl_fires", 0)
-        tgt     = s.get("target_fires", 0)
-        rpnl    = s.get("realized_pnl", 0)
+        trades   = s.get("trades", 0)
+        wr       = s.get("win_rate", 0)
+        psl      = s.get("psl_fires", 0)
+        tgt      = s.get("target_fires", 0)
+        rpnl     = s.get("realized_pnl", 0)
+        psl_rate = psl / trades * 100 if trades > 0 else 0.0
 
         print(f"  {w['label']:<18} {w['days']:>5.1f} {w['strength']:<10} {trades:>6} "
-              f"{wr:>5.1f}%  {psl:>3}  {tgt:>3}  ${rpnl:>+7.2f}")
+              f"{wr:>5.1f}%  {psl:>3} {psl_rate:>4.0f}%  {tgt:>3}  ${rpnl:>+7.2f}")
+
+        if trades > 0 and psl_rate > _HIGH_PSL_RATE * 100:
+            print(f"    !! high PSL rate: {psl_rate:.0f}% ({psl}/{trades}) -- "
+                  f"stops firing too early or entries chasing")
 
         h_rows.append({**s, "label": w["label"], "strength": w["strength"],
                         "days": w["days"]})
@@ -154,9 +174,10 @@ def print_results(results, capital, preset_name):
     total_trades = sum(s.get("trades", 0)          for _, _, s in results if s)
     total_psl    = sum(s.get("psl_fires", 0)       for _, _, s in results if s)
     total_tgt    = sum(s.get("target_fires", 0)    for _, _, s in results if s)
+    total_psl_rate = total_psl / total_trades * 100 if total_trades > 0 else 0.0
     print(f"  {sep2[:78]}")
     print(f"  {'COMBINED':<18} {'':>5} {'':>10} {total_trades:>6} "
-          f"{'':>6}  {total_psl:>3}  {total_tgt:>3}  ${total_pnl:>+7.2f}")
+          f"{'':>6}  {total_psl:>3} {total_psl_rate:>4.0f}%  {total_tgt:>3}  ${total_pnl:>+7.2f}")
     print(sep)
 
     # -- Hypothesis evaluation ------------------------------------------------
@@ -252,12 +273,13 @@ def main():
             w, tdf, s = fut.result()
             results_map[w["label"]] = (w, tdf, s)
             if s:
-                trades = s.get("trades", 0)
-                wr     = s.get("win_rate", 0)
-                rpnl   = s.get("realized_pnl", 0)
-                psl    = s.get("psl_fires", 0)
+                trades   = s.get("trades", 0)
+                wr       = s.get("win_rate", 0)
+                rpnl     = s.get("realized_pnl", 0)
+                psl      = s.get("psl_fires", 0)
+                psl_rate = psl / trades * 100 if trades > 0 else 0.0
                 print(f"  [{w['label']}]  {w['start']}  {w['strength']} ... "
-                      f"{trades} trades  wr={wr:.0f}%  psl={psl}  pnl=${rpnl:+.2f}")
+                      f"{trades} trades  wr={wr:.0f}%  psl={psl}({psl_rate:.0f}%)  pnl=${rpnl:+.2f}")
             else:
                 print(f"  [{w['label']}]  no data")
 
