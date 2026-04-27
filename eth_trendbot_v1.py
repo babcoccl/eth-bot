@@ -92,6 +92,19 @@ v1 history:
              Added per-subgate breakdown in diagnostic output (rsi/zscore/vol
              counts shown separately when trades==0) so future tuning is
              data-driven rather than speculative.
+  r9       — rsi_turning_up: adaptive confirmation based on depth of RSI drop.
+             In strong smooth uptrends (e.g. #2023-01, 89.6% h1 uptrend) RSI
+             oscillates gently and rarely produces two consecutive rising bars
+             at oversold levels — pullbacks are shallow and V-shaped. The
+             strict double-bar gate blocked 3,769 bars in #2023-01 (primary blocker).
+             Fix: require double-bar only when the prior RSI drop was steep
+             (rsi_drop >= 2.0), allow single-bar when drop was gentle (< 2.0).
+             rsi_drop = rsi_prev2 - rsi_prev (how much RSI fell into prior bar).
+             time_stop_min_pct: 0.0 → 0.003. Raises the progress threshold for
+             the 4h time stop from flat to +0.3%. #2023-10 and #2025-07 had
+             losses from time-stop exits at flat/slight loss with zero PSLs and
+             zero targets. 0.3% preserves slowly-trending positions while still
+             cutting stale flat trades.
 """
 
 import warnings
@@ -117,7 +130,7 @@ PRESETS = {
         "macro_context_bars":  1440,    # 5 days of 5m bars (5d * 24h * 12 bars)
         "macro_bearish_max":   0.65,    # skip if >65% of last 5d was CRASH/CORRECTION
         "time_stop_bars":     24,       # exit flat if no progress after 4h (24 * 5m bars)
-        "time_stop_min_pct":  0.0,      # only apply if position is below +0.0%
+        "time_stop_min_pct":  0.003,    # r9: raised from 0.0 — preserves slowly-trending positions
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -392,13 +405,20 @@ class TrendBot(BotInterface):
                 continue
 
             # ── Signal: RSI + z-score + volume ───────────────────────
-            # r8: keep double-RSI confirmation from r7 (rsi > rsi_prev > rsi_prev2).
-            # Requires the prior bar to already be rising — filters one-tick
-            # mid-downleg noise bounces that caused 0%/12% WR in #2022-03/#2023-01.
-            # zscore_max and vol_mult_min reverted to r6 levels: -1.5 and 1.30.
-            # r7's triple-tightening killed 7/9 windows (signal gate: 5k-6.6k
-            # bars/window). Only change one variable at a time.
-            rsi_turning_up = (rsi > rsi_prev) and (rsi_prev > rsi_prev2)
+            # r9: adaptive rsi_turning_up based on depth of prior RSI drop.
+            # In strong smooth uptrends RSI oscillates gently and rarely
+            # produces two consecutive rising bars at oversold levels —
+            # pullbacks are shallow and V-shaped (e.g. #2023-01: 3,769 bars
+            # blocked by strict double-bar gate despite 89.6% h1 uptrend).
+            # Fix: require double-bar confirmation only when the prior RSI
+            # drop was steep (rsi_drop >= 2.0); allow single rising bar when
+            # the oscillation was gentle (rsi_drop < 2.0).
+            # rsi_drop = how much RSI fell into rsi_prev (the bar before current).
+            rsi_drop = rsi_prev2 - rsi_prev
+            rsi_turning_up = (rsi > rsi_prev) and (
+                (rsi_drop >= 2.0 and rsi_prev > rsi_prev2) or  # steep drop: require double-bar
+                (rsi_drop < 2.0)                                 # gentle oscillation: single bar ok
+            )
 
             # Evaluate sub-gates individually for diagnostics
             rsi_pass = (rsi < rsi_max) and rsi_turning_up
@@ -447,7 +467,7 @@ class TrendBot(BotInterface):
                 ("psl_cooldown",  "PSL cooldown"),
                 ("entry_rsi_min", f"RSI < {p.get('entry_rsi_min',0)} (entry_rsi_min)"),
                 ("rsi_lookback",  "rsi_lookback: no RSI>55 in last 24 bars"),
-                ("sig_rsi",       "signal.rsi: rsi >= rsi_max or not turning up (double-bar)"),
+                ("sig_rsi",       "signal.rsi: rsi >= rsi_max or not turning up (adaptive)"),
                 ("sig_zscore",    f"signal.zscore: zscore >= {zscore_max} (not oversold enough)"),
                 ("sig_vol",       f"signal.vol: vol_ratio < {vol_min} (insufficient volume)"),
             ]
