@@ -202,6 +202,24 @@ class TrendBot(BotInterface):
 
         trend_streak = 0  # consecutive bars in BULL or RECOVERY
 
+        # -- Per-gate diagnostic counters (printed only when trades == 0) -----
+        _g = {
+            "open_position":  0,  # bar skipped — position already open
+            "regime":         0,  # regime5 not BULL/RECOVERY
+            "stable_bars":    0,  # trend_streak < regime_stable_bars
+            "macro_context":  0,  # too many CRASH/CORRECTION in macro lookback
+            "macro_dd":       0,  # ETH too far below 90d high
+            "strength":       0,  # window_strength not in allowed set
+            "rsi_nan":        0,  # RSI is NaN
+            "cooldown":       0,  # within entry cooldown
+            "psl_cooldown":   0,  # within PSL cooldown
+            "entry_rsi_min":  0,  # RSI below entry_rsi_min floor
+            "rsi_lookback":   0,  # no RSI > 55 in last 24 bars
+            "signal":         0,  # rsi/zscore/vol conditions not met
+            "entered":        0,  # bars where a trade was opened
+        }
+        # ---------------------------------------------------------------------
+
         for i in range(len(df)):
             row    = df.iloc[i]
             close  = float(row["close"])
@@ -219,10 +237,11 @@ class TrendBot(BotInterface):
 
             # ── MANAGE OPEN POSITION ─────────────────────────────────
             if self._position.is_open:
+                _g["open_position"] += 1
                 unreal = (close - self._position.avg_entry) / self._position.avg_entry
 
                 bull_cls = self._position.bull_class
-                manage_psl_mult = p.get("manage_psl_mult", 3.0)   # default=3.0 preserves existing behavior
+                manage_psl_mult = p.get("manage_psl_mult", 3.0)
                 max_psl_pct     = p.get("psl_atr_max", 0.07)
 
                 atr_pct_now   = (self._position.entry_atr_pct
@@ -232,9 +251,9 @@ class TrendBot(BotInterface):
                     atr_psl = atr_pct_now * manage_psl_mult
                     effective_psl = min(atr_psl, max_psl_pct)
                 else:
-                    effective_psl = p.get("pos_stop_loss_pct", 0.025)  # fixed-pct fallback
-                
-                # ── Time stop: exit flat if position stagnating ──────────────────
+                    effective_psl = p.get("pos_stop_loss_pct", 0.025)
+
+                # ── Time stop ────────────────────────────────────────────────
                 time_stop_bars = p.get("time_stop_bars", 0)
                 if time_stop_bars > 0:
                     bars_in_trade = i - self._position.entry_bar
@@ -244,9 +263,8 @@ class TrendBot(BotInterface):
                         if progress < min_progress:
                             self._sell(i, df, close, "time_stop", sell_fee_pct)
                             continue
-                # ─────────────────────────────────────────────────────────────────
+                # ─────────────────────────────────────────────────────────────
 
-                # Still allow bull_class override if it's tighter
                 if bull_cls and bull_cls in STOP_LOSS_BY_CLASS:
                     effective_psl = min(effective_psl, STOP_LOSS_BY_CLASS[bull_cls])
 
@@ -262,72 +280,79 @@ class TrendBot(BotInterface):
                 continue
 
             # ── SCAN FOR ENTRY (position flat) ───────────────────────
-            # Gate on MacroSupervisor BULL or RECOVERY regime
-           
 
             if regime5 not in _TREND_REGIMES:
+                _g["regime"] += 1
                 continue
 
-            # ── NEW: regime stability filter ─────────────────────────────────
-            # Require regime has been continuously BULL/RECOVERY for at least
-            # regime_stable_bars 5m bars (~N h1 bars * 12 bars/h1) before entry.
-            # Filters out "first bar after CRASH flip" false positives.
+            # ── Regime stability filter ──────────────────────────────
             regime_stable_bars = p.get("regime_stable_bars", 0)
             if regime_stable_bars > 0 and trend_streak < regime_stable_bars:
+                _g["stable_bars"] += 1
                 continue
-            # ─────────────────────────────────────────────────────────────────
 
-            # ── Macro context filter ──────────────────────────────────────────
-            # If the broader regime context is dominated by CRASH/CORRECTION,
-            # this is a relief rally, not a genuine trend. Suppress entry.
-            macro_lookback = p.get("macro_context_bars", 0)   # in 5m bars; 0 = disabled
+            # ── Macro context filter ─────────────────────────────────
+            macro_lookback = p.get("macro_context_bars", 0)
             if macro_lookback > 0:
                 recent = df["regime5"].iloc[max(0, i - macro_lookback):i]
                 bearish_frac = recent.isin(["CRASH", "CORRECTION"]).sum() / len(recent)
                 macro_bearish_max = p.get("macro_bearish_max", 0.60)
                 if bearish_frac > macro_bearish_max:
+                    _g["macro_context"] += 1
                     continue
-            # ─────────────────────────────────────────────────────────────────
 
+            # ── Macro drawdown filter ────────────────────────────────
             macro_dd_skip = p.get("macro_dd_skip", None)
             if macro_dd_skip is not None:
                 macro_dd = float(row.get("macro_dd_pct", 0.0))
                 if macro_dd < macro_dd_skip:
+                    _g["macro_dd"] += 1
                     continue
-            
-            strength = str(row.get("window_strength", "STRONG"))  # move this read up
+
+            # ── Trend strength filter ────────────────────────────────
+            strength = str(row.get("window_strength", "STRONG"))
             if strength not in strength_allowed:
+                _g["strength"] += 1
                 continue
 
+            # ── RSI validity ─────────────────────────────────────────
             _rsi_raw = df["rsi"].iat[i]
             if pd.isna(_rsi_raw):
+                _g["rsi_nan"] += 1
                 continue
             rsi = float(_rsi_raw)
 
-            rsi_prev = float(row.get("rsi_prev", 50))
-            zscore   = float(row.get("zscore", 0))
-            vol_r    = float(row.get("vol_ratio", 1))
+            rsi_prev  = float(row.get("rsi_prev", 50))
+            zscore    = float(row.get("zscore", 0))
+            vol_r     = float(row.get("vol_ratio", 1))
             rsi_prev2 = float(df["rsi"].iloc[i-2]) if i >= 2 and not pd.isna(df["rsi"].iloc[i-2]) else rsi_prev
 
+            # ── Cooldown filters ─────────────────────────────────────
             in_cooldown = (self._last_buy_ts is not None and
                            (ts - self._last_buy_ts).total_seconds() < cooldown)
             if in_cooldown:
+                _g["cooldown"] += 1
                 continue
 
             in_psl_cooldown = (self._last_psl_ts is not None and
                                (ts - self._last_psl_ts).total_seconds() < psl_cooldown)
             if in_psl_cooldown:
+                _g["psl_cooldown"] += 1
                 continue
-            
+
+            # ── RSI floor ────────────────────────────────────────────
             entry_rsi_min = p.get("entry_rsi_min", 0)
             if rsi < entry_rsi_min:
+                _g["entry_rsi_min"] += 1
                 continue
 
-            # Require RSI was above 50 within the last 8 bars — confirms pullback, not breakdown
+            # ── RSI lookback (confirm pullback, not breakdown) ────────
             rsi_lookback = df["rsi"].iloc[max(0, i-24):i]
             if rsi_lookback.empty or rsi_lookback.max() < 55:
+                _g["rsi_lookback"] += 1
                 continue
 
+            # ── Signal: RSI + z-score + volume ───────────────────────
             rsi_turning_up = (rsi > rsi_prev) and (rsi_prev < rsi_prev2)
 
             if (rsi      < rsi_max
@@ -346,10 +371,37 @@ class TrendBot(BotInterface):
 
                 self._buy(i, df, close, "uptrend_pb", effective_qty,
                           buy_fee_pct, resolved_target, min_profit, sell_fee_pct)
+                _g["entered"] += 1
+            else:
+                _g["signal"] += 1
 
         if self._position.is_open:
             self._sell(len(df) - 1, df, float(df.iloc[-1]["close"]),
                        "end_of_period", sell_fee_pct)
+
+        # -- Print gate diagnostics when no trades were produced --------------
+        if _g["entered"] == 0:
+            total_bars = len(df)
+            print(f"    [entry gates] no trades from {total_bars} bars:")
+            order = [
+                ("open_position", "position open"),
+                ("regime",        "regime not BULL/RECOVERY"),
+                ("stable_bars",   f"trend_streak < {p.get('regime_stable_bars',0)} (stable_bars)"),
+                ("macro_context", f"macro_context: >{p.get('macro_bearish_max',0.6):.0%} bearish"),
+                ("macro_dd",      f"macro_dd < {p.get('macro_dd_skip','off')}"),
+                ("strength",      f"strength not in {strength_allowed}"),
+                ("rsi_nan",       "RSI NaN"),
+                ("cooldown",      "entry cooldown"),
+                ("psl_cooldown",  "PSL cooldown"),
+                ("entry_rsi_min", f"RSI < {p.get('entry_rsi_min',0)} (entry_rsi_min)"),
+                ("rsi_lookback",  "rsi_lookback: no RSI>55 in last 24 bars"),
+                ("signal",        "signal: rsi/zscore/vol not met"),
+            ]
+            for key, label in order:
+                n = _g[key]
+                if n > 0:
+                    print(f"      {n:>6} bars  {label}")
+        # ---------------------------------------------------------------------
 
         return self._build_result(capital, preset_name)
 
