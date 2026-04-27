@@ -83,10 +83,15 @@ v1 history:
              bar itself to already be rising (confirmed trough reversal).
              Root cause of #2022-03 0% WR and #2023-01 12% WR: entries were
              firing on mid-downleg noise ticks, not genuine pullback troughs.
-             zscore_max: -1.5 → -1.8 (tighter oversold threshold).
-             vol_mult_min: 1.30 → 1.50 (higher volume conviction at entry).
-             Together these three tighten entry to only confirmed-turning,
-             deeply-oversold, high-volume reversal bars.
+             zscore_max: -1.5 → -1.8; vol_mult_min: 1.30 → 1.50 (OVERCORRECTED
+             — killed 7/9 windows; signal gate blocked 5k-6.6k bars/window).
+  r8       — Revert zscore_max: -1.8 → -1.5 (r6 level).
+             Revert vol_mult_min: 1.50 → 1.30 (r6 level).
+             Keep double-RSI confirmation (rsi > rsi_prev > rsi_prev2) — this
+             is the correct structural fix for mid-downleg noise entries.
+             Added per-subgate breakdown in diagnostic output (rsi/zscore/vol
+             counts shown separately when trades==0) so future tuning is
+             data-driven rather than speculative.
 """
 
 import warnings
@@ -103,11 +108,11 @@ PRESETS = {
         "base_qty":           0.05,
         "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
         "uptrend_rsi_max":    38,
-        "vol_mult_min":       1.50,     # r7: raised from 1.30; require stronger volume conviction at entry
+        "vol_mult_min":       1.30,     # r8: reverted from r7's 1.50 back to r6 level
         "cooldown_secs":      14400,
         "psl_cooldown_secs":  28800,    # 8h lockout after any stop-loss exit
         "min_profit_bps":     100,
-        "zscore_max":        -1.8,      # r7: tightened from -1.5; require deeper oversold compression
+        "zscore_max":        -1.5,      # r8: reverted from r7's -1.8 back to r6 level
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "macro_context_bars":  1440,    # 5 days of 5m bars (5d * 24h * 12 bars)
         "macro_bearish_max":   0.65,    # skip if >65% of last 5d was CRASH/CORRECTION
@@ -239,7 +244,10 @@ class TrendBot(BotInterface):
             "psl_cooldown":   0,  # within PSL cooldown
             "entry_rsi_min":  0,  # RSI below entry_rsi_min floor
             "rsi_lookback":   0,  # no RSI > 55 in last 24 bars
-            "signal":         0,  # rsi/zscore/vol conditions not met
+            # signal sub-gates (only counted when all prior gates pass)
+            "sig_rsi":        0,  # rsi >= rsi_max OR not turning up
+            "sig_zscore":     0,  # zscore >= zscore_max
+            "sig_vol":        0,  # vol_ratio < vol_min
             "entered":        0,  # bars where a trade was opened
         }
         # ---------------------------------------------------------------------
@@ -384,18 +392,20 @@ class TrendBot(BotInterface):
                 continue
 
             # ── Signal: RSI + z-score + volume ───────────────────────
-            # r7: require TWO consecutive rising RSI bars (confirmed trough reversal).
-            # rsi > rsi_prev > rsi_prev2 means the prior bar was already rising,
-            # not merely that this bar is higher than a single dip. This filters
-            # one-tick RSI bounces mid-downleg that caused 0%/12% WR in
-            # #2022-03 / #2023-01.
+            # r8: keep double-RSI confirmation from r7 (rsi > rsi_prev > rsi_prev2).
+            # Requires the prior bar to already be rising — filters one-tick
+            # mid-downleg noise bounces that caused 0%/12% WR in #2022-03/#2023-01.
+            # zscore_max and vol_mult_min reverted to r6 levels: -1.5 and 1.30.
+            # r7's triple-tightening killed 7/9 windows (signal gate: 5k-6.6k
+            # bars/window). Only change one variable at a time.
             rsi_turning_up = (rsi > rsi_prev) and (rsi_prev > rsi_prev2)
 
-            if (rsi      < rsi_max
-                    and rsi_turning_up
-                    and zscore < zscore_max
-                    and vol_r  >= vol_min):
-                strength      = str(row.get("window_strength", "STRONG"))
+            # Evaluate sub-gates individually for diagnostics
+            rsi_pass = (rsi < rsi_max) and rsi_turning_up
+            zscore_pass = zscore < zscore_max
+            vol_pass = vol_r >= vol_min
+
+            if rsi_pass and zscore_pass and vol_pass:
                 effective_qty = base_qty * qty_scale_map.get(strength, 1.0)
                 if p.get("target_bps") is None:
                     atr_pct = float(row.get("atr_pct", 0.005))
@@ -409,7 +419,13 @@ class TrendBot(BotInterface):
                           buy_fee_pct, resolved_target, min_profit, sell_fee_pct)
                 _g["entered"] += 1
             else:
-                _g["signal"] += 1
+                # Count which sub-gate(s) blocked (first-failure only)
+                if not rsi_pass:
+                    _g["sig_rsi"] += 1
+                elif not zscore_pass:
+                    _g["sig_zscore"] += 1
+                else:
+                    _g["sig_vol"] += 1
 
         if self._position.is_open:
             self._sell(len(df) - 1, df, float(df.iloc[-1]["close"]),
@@ -431,7 +447,9 @@ class TrendBot(BotInterface):
                 ("psl_cooldown",  "PSL cooldown"),
                 ("entry_rsi_min", f"RSI < {p.get('entry_rsi_min',0)} (entry_rsi_min)"),
                 ("rsi_lookback",  "rsi_lookback: no RSI>55 in last 24 bars"),
-                ("signal",        "signal: rsi/zscore/vol not met"),
+                ("sig_rsi",       "signal.rsi: rsi >= rsi_max or not turning up (double-bar)"),
+                ("sig_zscore",    f"signal.zscore: zscore >= {zscore_max} (not oversold enough)"),
+                ("sig_vol",       f"signal.vol: vol_ratio < {vol_min} (insufficient volume)"),
             ]
             for key, label in order:
                 n = _g[key]
