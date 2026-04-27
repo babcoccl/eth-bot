@@ -105,6 +105,21 @@ v1 history:
              losses from time-stop exits at flat/slight loss with zero PSLs and
              zero targets. 0.3% preserves slowly-trending positions while still
              cutting stale flat trades.
+  r10      — macro_dd_skip: exempt when regime5 == "RECOVERY". The -0.20 drawdown
+             gate is designed to avoid entering stealth downtrends masquerading as
+             recoveries. A bar already classified as RECOVERY by the MacroSupervisor
+             has passed regime validation — applying macro_dd_skip on top double-counts
+             the same condition. In post-crash RECOVERY windows (e.g. #2023-01,
+             Jan 2023 after 2022 bear market), ETH is definitionally 50-70% below
+             its 90d peak; macro_dd_skip = -0.20 was blocking 2,328 bars inside
+             a perfectly valid RECOVERY window. Only applied on BULL bars where
+             the intent (avoid fake recoveries in real downtrends) is still valid.
+             uptrend_rsi_recovery_max: 48 added to preset. In RECOVERY regime,
+             momentum bounces from deeply oversold levels drive RSI to 45-65,
+             not 28-38. The uptrend_rsi_max = 38 ceiling was blocking 3,762 bars
+             in #2023-01 after the macro_dd fix. Two distinct market microstructures
+             require two distinct RSI thresholds; this is structural, not overfit.
+             BULL bars continue to use uptrend_rsi_max = 38.
 """
 
 import warnings
@@ -118,19 +133,20 @@ warnings.filterwarnings("ignore")
 
 PRESETS = {
     "trendbot_v1": {
-        "base_qty":           0.05,
-        "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
-        "uptrend_rsi_max":    38,
-        "vol_mult_min":       1.30,     # r8: reverted from r7's 1.50 back to r6 level
-        "cooldown_secs":      14400,
-        "psl_cooldown_secs":  28800,    # 8h lockout after any stop-loss exit
-        "min_profit_bps":     100,
-        "zscore_max":        -1.5,      # r8: reverted from r7's -1.8 back to r6 level
-        "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
-        "macro_context_bars":  1440,    # 5 days of 5m bars (5d * 24h * 12 bars)
-        "macro_bearish_max":   0.65,    # skip if >65% of last 5d was CRASH/CORRECTION
-        "time_stop_bars":     24,       # exit flat if no progress after 4h (24 * 5m bars)
-        "time_stop_min_pct":  0.003,    # r9: raised from 0.0 — preserves slowly-trending positions
+        "base_qty":                   0.05,
+        "pos_stop_loss_pct":          0.025,    # 250bps — empirically derived; break-even at 60% WR
+        "uptrend_rsi_max":            38,        # RSI ceiling for BULL-regime bars
+        "uptrend_rsi_recovery_max":   48,        # r10: looser RSI ceiling for RECOVERY-regime bars
+        "vol_mult_min":               1.30,      # r8: reverted from r7's 1.50 back to r6 level
+        "cooldown_secs":              14400,
+        "psl_cooldown_secs":          28800,     # 8h lockout after any stop-loss exit
+        "min_profit_bps":             100,
+        "zscore_max":                -1.5,       # r8: reverted from r7's -1.8 back to r6 level
+        "regime_stable_bars":         72,        # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
+        "macro_context_bars":         1440,      # 5 days of 5m bars (5d * 24h * 12 bars)
+        "macro_bearish_max":          0.65,      # skip if >65% of last 5d was CRASH/CORRECTION
+        "time_stop_bars":             24,        # exit flat if no progress after 4h (24 * 5m bars)
+        "time_stop_min_pct":          0.003,     # r9: raised from 0.0 — preserves slowly-trending positions
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -146,7 +162,7 @@ PRESETS = {
         "psl_atr_max":       0.07,
         "manage_psl_mult":   3.0,
         "psl_atr_mult":      1.5,
-        "macro_dd_skip":     -0.20,
+        "macro_dd_skip":     -0.20,     # r10: only applied on BULL bars, not RECOVERY
         "entry_rsi_min":     30,
     },
     "trendbot_v1_aggressive": {
@@ -234,6 +250,7 @@ class TrendBot(BotInterface):
         target_bps       = p["target_bps"]
         psl_pct          = p["pos_stop_loss_pct"]
         rsi_max          = p["uptrend_rsi_max"]
+        rsi_recovery_max = p.get("uptrend_rsi_recovery_max", rsi_max)
         vol_min          = p["vol_mult_min"]
         cooldown         = p["cooldown_secs"]
         psl_cooldown     = p.get("psl_cooldown_secs", cooldown)
@@ -250,7 +267,7 @@ class TrendBot(BotInterface):
             "regime":         0,  # regime5 not BULL/RECOVERY
             "stable_bars":    0,  # trend_streak < regime_stable_bars
             "macro_context":  0,  # too many CRASH/CORRECTION in macro lookback
-            "macro_dd":       0,  # ETH too far below 90d high
+            "macro_dd":       0,  # ETH too far below 90d high (BULL bars only)
             "strength":       0,  # window_strength not in allowed set
             "rsi_nan":        0,  # RSI is NaN
             "cooldown":       0,  # within entry cooldown
@@ -258,7 +275,7 @@ class TrendBot(BotInterface):
             "entry_rsi_min":  0,  # RSI below entry_rsi_min floor
             "rsi_lookback":   0,  # no RSI > 55 in last 24 bars
             # signal sub-gates (only counted when all prior gates pass)
-            "sig_rsi":        0,  # rsi >= rsi_max OR not turning up
+            "sig_rsi":        0,  # rsi >= rsi_ceiling OR not turning up
             "sig_zscore":     0,  # zscore >= zscore_max
             "sig_vol":        0,  # vol_ratio < vol_min
             "entered":        0,  # bars where a trade was opened
@@ -346,9 +363,13 @@ class TrendBot(BotInterface):
                     _g["macro_context"] += 1
                     continue
 
-            # ── Macro drawdown filter ────────────────────────────────
+            # ── Macro drawdown filter (BULL bars only) ────────────────
+            # r10: exempt RECOVERY bars. In post-crash RECOVERY, ETH is
+            # definitionally far below its 90d peak — applying macro_dd_skip
+            # double-counts what the MacroSupervisor already validated.
+            # The gate's intent (avoid stealth downtrends) only applies in BULL.
             macro_dd_skip = p.get("macro_dd_skip", None)
-            if macro_dd_skip is not None:
+            if macro_dd_skip is not None and regime5 != "RECOVERY":
                 macro_dd = float(row.get("macro_dd_pct", 0.0))
                 if macro_dd < macro_dd_skip:
                     _g["macro_dd"] += 1
@@ -405,15 +426,18 @@ class TrendBot(BotInterface):
                 continue
 
             # ── Signal: RSI + z-score + volume ───────────────────────
+            # r10: regime-aware RSI ceiling.
+            # BULL bars use uptrend_rsi_max (38) — gradual uptrend, shallow
+            # pullbacks, RSI oscillates 28-45.
+            # RECOVERY bars use uptrend_rsi_recovery_max (48) — momentum bounce
+            # from deeply oversold levels, RSI oscillates 45-65, tighter 38
+            # ceiling was structurally blocking all entries in post-crash
+            # RECOVERY windows (e.g. #2023-01: 3,762 bars blocked).
+            rsi_ceiling = rsi_recovery_max if regime5 == "RECOVERY" else rsi_max
+
             # r9: adaptive rsi_turning_up based on depth of prior RSI drop.
-            # In strong smooth uptrends RSI oscillates gently and rarely
-            # produces two consecutive rising bars at oversold levels —
-            # pullbacks are shallow and V-shaped (e.g. #2023-01: 3,769 bars
-            # blocked by strict double-bar gate despite 89.6% h1 uptrend).
-            # Fix: require double-bar confirmation only when the prior RSI
-            # drop was steep (rsi_drop >= 2.0); allow single rising bar when
-            # the oscillation was gentle (rsi_drop < 2.0).
-            # rsi_drop = how much RSI fell into rsi_prev (the bar before current).
+            # Require double-bar confirmation when drop was steep (>= 2.0 RSI pts);
+            # allow single rising bar when oscillation was gentle (< 2.0 RSI pts).
             rsi_drop = rsi_prev2 - rsi_prev
             rsi_turning_up = (rsi > rsi_prev) and (
                 (rsi_drop >= 2.0 and rsi_prev > rsi_prev2) or  # steep drop: require double-bar
@@ -421,9 +445,9 @@ class TrendBot(BotInterface):
             )
 
             # Evaluate sub-gates individually for diagnostics
-            rsi_pass = (rsi < rsi_max) and rsi_turning_up
+            rsi_pass    = (rsi < rsi_ceiling) and rsi_turning_up
             zscore_pass = zscore < zscore_max
-            vol_pass = vol_r >= vol_min
+            vol_pass    = vol_r >= vol_min
 
             if rsi_pass and zscore_pass and vol_pass:
                 effective_qty = base_qty * qty_scale_map.get(strength, 1.0)
@@ -460,14 +484,14 @@ class TrendBot(BotInterface):
                 ("regime",        "regime not BULL/RECOVERY"),
                 ("stable_bars",   f"trend_streak < {p.get('regime_stable_bars',0)} (stable_bars)"),
                 ("macro_context", f"macro_context: >{p.get('macro_bearish_max',0.6):.0%} bearish in last {p.get('macro_context_bars',0)} bars"),
-                ("macro_dd",      f"macro_dd < {p.get('macro_dd_skip','off')}"),
+                ("macro_dd",      f"macro_dd < {p.get('macro_dd_skip','off')} (BULL bars only)"),
                 ("strength",      f"strength not in {strength_allowed}"),
                 ("rsi_nan",       "RSI NaN"),
                 ("cooldown",      "entry cooldown"),
                 ("psl_cooldown",  "PSL cooldown"),
                 ("entry_rsi_min", f"RSI < {p.get('entry_rsi_min',0)} (entry_rsi_min)"),
                 ("rsi_lookback",  "rsi_lookback: no RSI>55 in last 24 bars"),
-                ("sig_rsi",       "signal.rsi: rsi >= rsi_max or not turning up (adaptive)"),
+                ("sig_rsi",       f"signal.rsi: rsi >= rsi_ceiling or not turning up (adaptive; BULL<{rsi_max} RECOV<{rsi_recovery_max})"),
                 ("sig_zscore",    f"signal.zscore: zscore >= {zscore_max} (not oversold enough)"),
                 ("sig_vol",       f"signal.vol: vol_ratio < {vol_min} (insufficient volume)"),
             ]
