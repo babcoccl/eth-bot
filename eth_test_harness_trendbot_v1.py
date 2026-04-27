@@ -15,6 +15,16 @@ Hypotheses:
   H6  STRONG windows produce higher PnL-per-trade than MODERATE windows
       (qty_scale is 0.5x for MODERATE -- compare quality, not activity count)
 
+Known-limitation windows (accepted no-edge cases -- do not tune for these):
+  #2023-01 (Jan 2023): post-2022-bear RECOVERY, ETH ~70% below 90d peak.
+    RSI never reaches sub-38 oversold. Produces 0-2 trades, near-zero PnL.
+    See bot docstring Known Limitations for full analysis.
+  #2022-03 (Mar-Apr 2022): dead-cat bounce at onset of 2022 bear market.
+    Window passes all gate qualifiers but RSI hovers at 37-38 throughout
+    (shallow momentum bounce, never genuinely oversold). Both entries fire
+    near RSI ceiling; 100% PSL rate. $-6.87 does not threaten H1-H3.
+    See bot docstring Known Limitations for full analysis.
+
 Notes:
   - max_hold_days=60: trend windows are shorter-lived than corrections.
   - Same try_shifts retry logic as CorrectionBot harness (up to 3d shift).
@@ -38,6 +48,12 @@ r12 harness changes:
     unequal window counts (5 STRONG vs 4 MODERATE in current harness) and by
     design intent -- MODERATE uses 0.5x qty_scale, so fewer/smaller trades are
     expected. PnL-per-trade normalizes for both qty and window count.
+
+r13 harness changes:
+  - Added Known-limitation windows block above (#2023-01, #2022-03).
+    Both windows pass gate qualifiers but have microstructures incompatible
+    with the pullback signal design. Documented to prevent future tuning
+    attempts for these specific windows.
 """
 
 import argparse, sys, os, warnings
@@ -74,11 +90,11 @@ def _print_trade_detail(label, tdf):
     """Print per-trade entry detail for a high-PSL window.
 
     Printed columns (buy-side rows only):
-      ts, regime5, rsi, zscore, vol_ratio, atr (entry), exit_reason,
+      ts, regime5, rsi, zscore, vol_ratio, exit_reason,
       bars_held, entry_price, exit_price, price_move_pct, pnl
 
-    Helps diagnose whether PSL entries are chasing (RSI 34-37 near ceiling)
-    or entering at genuine troughs (RSI 30-33) with post-entry adverse moves.
+    Helps diagnose whether PSL entries are chasing (RSI near ceiling)
+    or entering at genuine troughs with adverse post-entry price action.
     """
     buys = tdf[tdf["side"] == "BUY"].copy()
     if buys.empty:
@@ -96,14 +112,13 @@ def _print_trade_detail(label, tdf):
     print(f"      {'-'*len(header.rstrip())}")
 
     for idx, buy in buys.iterrows():
-        # Find the matching sell by row order (buys and sells are paired in order)
         sell = sells.iloc[idx] if idx < len(sells) else None
 
         entry_price = float(buy["price"])
-        exit_price  = float(sell["price"])  if sell is not None else float("nan")
+        exit_price  = float(sell["price"])     if sell is not None else float("nan")
         bars_held   = float(sell["bars_held"]) if sell is not None else float("nan")
-        reason      = str(sell["reason"])   if sell is not None else "open"
-        pnl         = float(sell["pnl"])    if sell is not None else float("nan")
+        reason      = str(sell["reason"])      if sell is not None else "open"
+        pnl         = float(sell["pnl"])       if sell is not None else float("nan")
         move_pct    = (exit_price - entry_price) / entry_price * 100 if sell is not None else float("nan")
 
         rsi       = buy["rsi"]
@@ -168,8 +183,6 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60,
               f"| {', '.join(f'{k}={v:.1%}' for k, v in sorted(regime_dist.items()))}")
 
         # h1 regime distribution (entry gate diagnostic)
-        # TrendBot requires h1 UPTREND to enter -- if h1 is rarely UPTREND even
-        # when 5m is BULL/RECOVERY, the bot will produce zero trades.
         if "regime_h1" in df_gate.columns:
             h1_dist        = df_gate["regime_h1"].value_counts(normalize=True).to_dict()
             h1_uptrend_pct = h1_dist.get("UPTREND", 0)
@@ -209,7 +222,6 @@ def print_results(results, capital, preset_name):
     print(f"  {sep2[:78]}")
 
     h_rows = []
-    # Collect (w, tdf, s) tuples for the trade-detail pass after the table
     high_psl_windows = []
 
     for w, tdf, s in results:
@@ -247,9 +259,6 @@ def print_results(results, capital, preset_name):
     print(sep)
 
     # -- Per-trade entry detail for high-PSL windows --------------------------
-    # Printed after the summary table so aggregate view is not disrupted.
-    # Diagnostic goal: identify whether PSL entries are chasing (RSI near ceiling)
-    # or entering at valid troughs with adverse post-entry price action.
     if high_psl_windows:
         print(f"\n{sep}")
         print(f" TrendBot v1 -- HIGH-PSL WINDOW ENTRY DIAGNOSTICS (PSL rate >= {_HIGH_PSL_RATE:.0%})")

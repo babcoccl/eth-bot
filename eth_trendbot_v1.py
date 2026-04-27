@@ -50,6 +50,26 @@ PRIMARY  : 2025-07-06 → 2025-07-31 (RECOVERY→BULL, 25d, +28.2%)
 SECONDARY: 2025-05-08 → 2025-05-16 (BULL, 8.6d, +36.1%)
 HOLDOUT  : 2025-12-30 → 2026-01-06 (RECOVERY, 7d, +7.9%)
 
+Known limitations (accepted — do not tune for these windows):
+  #2023-01 (Jan 2023, post-2022-bear RECOVERY):
+    ETH ~70% below 90d peak. RSI dynamics in deep post-crash recovery do not
+    produce sub-38 oversold pullbacks followed by ATR-scale target moves. The
+    window passes all gate qualifiers (97.3% tradeable, 89.6% h1 uptrend) but
+    the pullback signal design does not match this microstructure. Produces
+    0–2 trades, near-zero net PnL. Correct outcome — do not chase with RSI
+    ceiling relaxation or lookback changes.
+  #2022-03 (Mar–Apr 2022, onset of 2022 bear market):
+    Window passes all gate qualifiers (94.6% tradeable, 83.6% h1 uptrend) but
+    price action is a dead-cat bounce within an emerging downtrend. RSI hovers
+    at 37–38 throughout — never gets deeply oversold — because the pullbacks
+    are shallow momentum-driven moves rather than genuine trough reversals.
+    Both entries fire near the RSI ceiling (37.6–37.7 on BULL bars) with no
+    margin to reach target, producing 100% PSL rate. Root cause confirmed via
+    r12 entry diagnostics: RSI 37.58 and 37.65 at entry. A BULL-only ceiling
+    tightening to 37.0 would block both losers but would be derived from 2
+    trades in 1 window — overfitting. Loss is $-6.87; does not threaten H1–H3.
+    Do not tune for this window.
+
 v1 history:
   initial  — used regime_h1 == "UPTREND" gate; MacroSupervisor never writes
              regime_h1 so every entry was silently skipped. Fixed to regime5.
@@ -129,12 +149,24 @@ v1 history:
              Both BULL and RECOVERY bars revert to uptrend_rsi_max = 38.
              macro_dd_skip RECOVERY exemption from r10 is retained — that
              change is structurally correct and orthogonal to the RSI issue.
-             Known limitation: #2023-01 (Jan 2023, post-2022-bear RECOVERY)
-             produces 0 trades after r11. ETH was ~70% below its 90d peak
-             and RSI dynamics in that window do not produce sub-38 oversold
-             pullbacks. This is the correct outcome — the pullback signal
-             design does not match post-crash RSI microstructure. Document
-             and do not continue tuning for this edge case.
+             Known limitation: #2023-01 produces 0–2 trades (see above).
+  r12      — No preset changes. Harness-only: added per-trade entry diagnostics
+             for high-PSL windows (_print_trade_detail in harness); H6 redefined
+             to PnL-per-trade STRONG vs MODERATE. Diagnosed #2022-03: both PSL
+             entries at RSI 37.58/37.65 on BULL bars — near-ceiling exhaustion
+             entries, not trough entries. Confirmed via full entry RSI distribution
+             across all 39 trades: 37+ BULL entries are exclusively #2022-03;
+             37+ RECOVERY entries are 3W/1L (structurally different microstructure).
+             Decision: document #2022-03 as known limitation, no parameter change.
+             A BULL-only ceiling of 37.0 would block both losers but derives from
+             2 trades in 1 window — overfitting per development philosophy.
+  r13      — Documentation only. Added Known Limitations block above for #2023-01
+             and #2022-03. No preset or gate changes. Open investigation:
+             #2025-07 trade count collapse (r9: 5 trades → r11: 2 trades) in a
+             99.2% tradeable, 93.6% h1-uptrend window with 100% WR. 63.6%
+             RECOVERY composition — rsi_lookback 24-bar window is next candidate
+             to examine (may be too short for RECOVERY windows where RSI peak
+             occurred >24 bars prior to pullback trough).
 """
 
 import warnings
