@@ -39,6 +39,19 @@ qty_scale:
   to cap drawdown in historically weaker conditions without removing those
   windows from the sample entirely.
 
+rsi_lookback_bars / rsi_lookback_bars_recovery:
+  Number of bars looked back to confirm a recent RSI peak above 55 (confirms
+  we are entering a genuine pullback, not a breakdown from low levels).
+  BULL bars use rsi_lookback_bars (default 24 = 2h). In BULL regime, RSI
+  typically cycles from oversold to overbought quickly; a 2h window reliably
+  captures the prior RSI peak before the pullback trough.
+  RECOVERY bars use rsi_lookback_bars_recovery (default 48 = 4h). In RECOVERY
+  regime, RSI recovers from deeply oversold levels more gradually; the peak
+  above 55 can occur 3–5h before the pullback trough. The 24-bar window misses
+  this peak and incorrectly blocks valid entries. 48 bars = 4h covers the
+  typical RECOVERY oscillation cycle without being so wide it admits
+  breakdowns from stale peaks (RSI > 55 two full days ago is not a recent peak).
+
 Design principle: do ONE thing well.
 This bot only fires when MacroSupervisor regime5 is BULL or RECOVERY and price pulls back.
 It does not trade ranges, it does not average down.
@@ -167,6 +180,17 @@ v1 history:
              RECOVERY composition — rsi_lookback 24-bar window is next candidate
              to examine (may be too short for RECOVERY windows where RSI peak
              occurred >24 bars prior to pullback trough).
+  r14      — rsi_lookback_bars: parameterized (was hardcoded i-24).
+             rsi_lookback_bars = 24 for BULL bars (unchanged behavior).
+             rsi_lookback_bars_recovery = 48 for RECOVERY bars.
+             Root cause of #2025-07 trade count collapse: window is 63.6%
+             RECOVERY. In RECOVERY regime, RSI recovers from deeply oversold
+             levels gradually — the peak above 55 typically occurs 3–5h (36–60
+             5m bars) before the pullback trough. The 24-bar (2h) lookback was
+             expiring before the trough formed, blocking valid RECOVERY entries.
+             48-bar (4h) window covers the full RECOVERY oscillation cycle.
+             BULL behavior is unchanged. Diagnostic label updated to show
+             regime-conditional window size.
 """
 
 import warnings
@@ -193,6 +217,8 @@ PRESETS = {
         "macro_bearish_max":          0.65,      # skip if >65% of last 5d was CRASH/CORRECTION
         "time_stop_bars":             24,        # exit flat if no progress after 4h (24 * 5m bars)
         "time_stop_min_pct":          0.003,     # r9: raised from 0.0 — preserves slowly-trending positions
+        "rsi_lookback_bars":          24,        # BULL: bars to look back for RSI > 55 peak (24 = 2h)
+        "rsi_lookback_bars_recovery": 48,        # RECOVERY: wider window; RSI peak occurs 3-5h before trough
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
@@ -304,6 +330,10 @@ class TrendBot(BotInterface):
         qty_scale_map    = p.get("qty_scale", {})
         strength_allowed = set(p.get("trend_strength_allowed", {"STRONG", "PARABOLIC", "MODERATE"}))
 
+        # r14: regime-conditional RSI lookback window
+        rsi_lb_bull     = p.get("rsi_lookback_bars", 24)
+        rsi_lb_recovery = p.get("rsi_lookback_bars_recovery", 48)
+
         trend_streak = 0  # consecutive bars in BULL or RECOVERY
 
         # -- Per-gate diagnostic counters (printed only when trades == 0) -----
@@ -318,7 +348,7 @@ class TrendBot(BotInterface):
             "cooldown":       0,  # within entry cooldown
             "psl_cooldown":   0,  # within PSL cooldown
             "entry_rsi_min":  0,  # RSI below entry_rsi_min floor
-            "rsi_lookback":   0,  # no RSI > 55 in last 24 bars
+            "rsi_lookback":   0,  # no RSI > 55 in lookback window
             # signal sub-gates (only counted when all prior gates pass)
             "sig_rsi":        0,  # rsi >= rsi_max or not turning up
             "sig_zscore":     0,  # zscore >= zscore_max
@@ -465,8 +495,12 @@ class TrendBot(BotInterface):
                     continue
 
             # ── RSI lookback (confirm pullback, not breakdown) ────────
-            rsi_lookback = df["rsi"].iloc[max(0, i-24):i]
-            if rsi_lookback.empty or rsi_lookback.max() < 55:
+            # r14: regime-conditional window. RECOVERY RSI peaks occur
+            # 3-5h before the trough; use wider 48-bar (4h) window.
+            # BULL RSI cycles faster; 24-bar (2h) window is sufficient.
+            rsi_lb = rsi_lb_recovery if regime5 == "RECOVERY" else rsi_lb_bull
+            rsi_lookback_slice = df["rsi"].iloc[max(0, i - rsi_lb):i]
+            if rsi_lookback_slice.empty or rsi_lookback_slice.max() < 55:
                 _g["rsi_lookback"] += 1
                 continue
 
@@ -532,7 +566,8 @@ class TrendBot(BotInterface):
                 ("cooldown",      "entry cooldown"),
                 ("psl_cooldown",  "PSL cooldown"),
                 ("entry_rsi_min", f"RSI < {p.get('entry_rsi_min',0)} (entry_rsi_min)"),
-                ("rsi_lookback",  "rsi_lookback: no RSI>55 in last 24 bars"),
+                ("rsi_lookback",  f"rsi_lookback: no RSI>55 in last "
+                                  f"{rsi_lb_bull}b (BULL) / {rsi_lb_recovery}b (RECOVERY)"),
                 ("sig_rsi",       f"signal.rsi: rsi >= rsi_max or not turning up (adaptive)"),
                 ("sig_zscore",    f"signal.zscore: zscore >= {zscore_max} (not oversold enough)"),
                 ("sig_vol",       f"signal.vol: vol_ratio < {vol_min} (insufficient volume)"),
