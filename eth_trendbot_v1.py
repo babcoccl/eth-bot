@@ -76,6 +76,17 @@ v1 history:
              was wrong. macro_context_bars: 2880 → 1440 (10d → 5d). The 10d
              lookback reaches into the 180d warmup period (heavily CRASH) and
              blocks entries in the first several days of clean recovery windows.
+  r7       — rsi_turning_up: strengthened from single-bar to two-bar confirmation.
+             Was: (rsi > rsi_prev) AND (rsi_prev < rsi_prev2) -- fires on any
+             one-tick RSI bounce after a single lower bar (noise within downleg).
+             Now: rsi > rsi_prev AND rsi_prev > rsi_prev2 -- requires the prior
+             bar itself to already be rising (confirmed trough reversal).
+             Root cause of #2022-03 0% WR and #2023-01 12% WR: entries were
+             firing on mid-downleg noise ticks, not genuine pullback troughs.
+             zscore_max: -1.5 → -1.8 (tighter oversold threshold).
+             vol_mult_min: 1.30 → 1.50 (higher volume conviction at entry).
+             Together these three tighten entry to only confirmed-turning,
+             deeply-oversold, high-volume reversal bars.
 """
 
 import warnings
@@ -92,43 +103,38 @@ PRESETS = {
         "base_qty":           0.05,
         "pos_stop_loss_pct":  0.025,    # 250bps — empirically derived; break-even at 60% WR
         "uptrend_rsi_max":    38,
-        "vol_mult_min":       1.30,
+        "vol_mult_min":       1.50,     # r7: raised from 1.30; require stronger volume conviction at entry
         "cooldown_secs":      14400,
-        "psl_cooldown_secs":  28800,     # 8h lockout after any stop-loss exit
+        "psl_cooldown_secs":  28800,    # 8h lockout after any stop-loss exit
         "min_profit_bps":     100,
-        "zscore_max":        -1.5,
+        "zscore_max":        -1.8,      # r7: tightened from -1.5; require deeper oversold compression
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
         "macro_context_bars":  1440,    # 5 days of 5m bars (5d * 24h * 12 bars)
-                                        # r6: reduced from 2880 (10d) -- 10d lookback reaches into
-                                        # the 180d warmup (heavily CRASH) and blocked entries at
-                                        # the start of clean post-crash recovery windows.
         "macro_bearish_max":   0.65,    # skip if >65% of last 5d was CRASH/CORRECTION
         "time_stop_bars":     24,       # exit flat if no progress after 4h (24 * 5m bars)
-        "time_stop_min_pct":  0.0,      # only apply if position is below +0.0% (not already running)
+        "time_stop_min_pct":  0.0,      # only apply if position is below +0.0%
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
             "MODERATE":  0.5,           # half size on MODERATE — risk management only
         },
         "trend_strength_allowed": {"STRONG", "PARABOLIC", "MODERATE"},
-                                        # r6: added MODERATE. All 4 no-data windows were MODERATE;
-                                        # qty_scale=0.5x already provides drawdown protection.
         "buy_fee_pct":        0.00065,
         "sell_fee_pct":       0.00025,
         "target_bps":        None,      # set to None to enable dynamic mode
-        "target_atr_mult":   1.5,       # target = entry_price * atr_pct * mult → converted to bps
-        "target_bps_min":    120,       # floor — never go below break-even buffer
-        "target_bps_max":    350,       # ceiling — cap runaway ATR spikes
-        "psl_atr_max":       0.07,      # hard cap — never wider than 7%
-        "manage_psl_mult":   3.0,       # (position management PSL width)
-        "psl_atr_mult":      1.5,       # PSL = atr_pct * mult, subject to psl_atr_max cap and bull_class overrides
-        "macro_dd_skip":     -0.20,     # skip entries if ETH is >20% below 90d high
-        "entry_rsi_min":     30,        # don't enter if RSI has already collapsed — stale BULL signal
+        "target_atr_mult":   1.5,
+        "target_bps_min":    120,
+        "target_bps_max":    350,
+        "psl_atr_max":       0.07,
+        "manage_psl_mult":   3.0,
+        "psl_atr_mult":      1.5,
+        "macro_dd_skip":     -0.20,
+        "entry_rsi_min":     30,
     },
     "trendbot_v1_aggressive": {
         "base_qty":           0.05,
         "target_bps":         220,
-        "pos_stop_loss_pct":  0.030,    # 300bps — proportional to wider target
+        "pos_stop_loss_pct":  0.030,
         "uptrend_rsi_max":    48,
         "vol_mult_min":       0.70,
         "cooldown_secs":      1200,
@@ -378,7 +384,12 @@ class TrendBot(BotInterface):
                 continue
 
             # ── Signal: RSI + z-score + volume ───────────────────────
-            rsi_turning_up = (rsi > rsi_prev) and (rsi_prev < rsi_prev2)
+            # r7: require TWO consecutive rising RSI bars (confirmed trough reversal).
+            # rsi > rsi_prev > rsi_prev2 means the prior bar was already rising,
+            # not merely that this bar is higher than a single dip. This filters
+            # one-tick RSI bounces mid-downleg that caused 0%/12% WR in
+            # #2022-03 / #2023-01.
+            rsi_turning_up = (rsi > rsi_prev) and (rsi_prev > rsi_prev2)
 
             if (rsi      < rsi_max
                     and rsi_turning_up
