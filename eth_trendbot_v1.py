@@ -63,12 +63,19 @@ v1 history:
              Root cause of CyA/CyB losses is regime-hostile windows (10%/29%
              tradeable), not entry timing. Fix is harness window selection,
              not TrendBot parameter tuning.
- r5       — entry_min_atr_pct = 0.008 added. Filters STRONG entries in
+  r5       — entry_min_atr_pct = 0.008 added. Filters STRONG entries in
              low-ATR regimes (T03/T04/T05 avg 0.5% ATR) while preserving
              high-ATR STRONG windows (T12 avg 1.2%) and all PARABOLIC windows.
              trend_strength_allowed restored to {"STRONG", "PARABOLIC"}.
              Hypothesis: PSL rate will drop as low-ATR entries that reverse
              sharply within 15 bars are suppressed at the entry gate.
+  r6       — trend_strength_allowed: added MODERATE. Root cause of 4 no-data
+             windows (#2022-08, #2023-10, #2024-02, #2024-11): all have
+             strength=MODERATE in trend_windows_generated.py. MODERATE already
+             has 0.5x qty_scale for drawdown control — excluding entry entirely
+             was wrong. macro_context_bars: 2880 → 1440 (10d → 5d). The 10d
+             lookback reaches into the 180d warmup period (heavily CRASH) and
+             blocks entries in the first several days of clean recovery windows.
 """
 
 import warnings
@@ -87,31 +94,36 @@ PRESETS = {
         "uptrend_rsi_max":    38,
         "vol_mult_min":       1.30,
         "cooldown_secs":      14400,
-        "psl_cooldown_secs":  28800,     # 2h lockout after any stop-loss exit
+        "psl_cooldown_secs":  28800,     # 8h lockout after any stop-loss exit
         "min_profit_bps":     100,
         "zscore_max":        -1.5,
         "regime_stable_bars": 72,       # require 6 h1 bars of stable regime (6h * 12 = 72 5m bars)
-        "macro_context_bars":  2880,   # 10 days of 5m bars (10d * 24h * 12 bars)
-        "macro_bearish_max":   0.65,   # skip if >55% of last 10d was CRASH/CORRECTION
-        "time_stop_bars":     24,    # exit flat if no progress after 4h (24 * 5m bars)
-        "time_stop_min_pct":  0.0, # only apply if position is below +0.0% (not already running)
+        "macro_context_bars":  1440,    # 5 days of 5m bars (5d * 24h * 12 bars)
+                                        # r6: reduced from 2880 (10d) -- 10d lookback reaches into
+                                        # the 180d warmup (heavily CRASH) and blocked entries at
+                                        # the start of clean post-crash recovery windows.
+        "macro_bearish_max":   0.65,    # skip if >65% of last 5d was CRASH/CORRECTION
+        "time_stop_bars":     24,       # exit flat if no progress after 4h (24 * 5m bars)
+        "time_stop_min_pct":  0.0,      # only apply if position is below +0.0% (not already running)
         "qty_scale": {
             "STRONG":    1.0,
             "PARABOLIC": 1.0,
             "MODERATE":  0.5,           # half size on MODERATE — risk management only
         },
-        "trend_strength_allowed": {"STRONG","PARABOLIC"},
+        "trend_strength_allowed": {"STRONG", "PARABOLIC", "MODERATE"},
+                                        # r6: added MODERATE. All 4 no-data windows were MODERATE;
+                                        # qty_scale=0.5x already provides drawdown protection.
         "buy_fee_pct":        0.00065,
         "sell_fee_pct":       0.00025,
-        "target_bps":        None,   # set to None to enable dynamic mode
-        "target_atr_mult":   1.5,    # target = entry_price * atr_pct * mult → converted to bps
-        "target_bps_min":    120,    # floor — never go below break-even buffer
-        "target_bps_max":    350,    # ceiling — cap runaway ATR spikes
-        "psl_atr_max":       0.07,   # hard cap — never wider than 7%
-        "manage_psl_mult":   3.0,    # (position management PSL width)
-        "psl_atr_mult":      1.5,    # PSL = atr_pct * mult, subject to psl_atr_max cap and bull_class overrides
-        "macro_dd_skip":     -0.20,   # skip entries if ETH is >20% below 90d high    
-        "entry_rsi_min":     30,   # don't enter if RSI has already collapsed — stale BULL signal
+        "target_bps":        None,      # set to None to enable dynamic mode
+        "target_atr_mult":   1.5,       # target = entry_price * atr_pct * mult → converted to bps
+        "target_bps_min":    120,       # floor — never go below break-even buffer
+        "target_bps_max":    350,       # ceiling — cap runaway ATR spikes
+        "psl_atr_max":       0.07,      # hard cap — never wider than 7%
+        "manage_psl_mult":   3.0,       # (position management PSL width)
+        "psl_atr_mult":      1.5,       # PSL = atr_pct * mult, subject to psl_atr_max cap and bull_class overrides
+        "macro_dd_skip":     -0.20,     # skip entries if ETH is >20% below 90d high
+        "entry_rsi_min":     30,        # don't enter if RSI has already collapsed — stale BULL signal
     },
     "trendbot_v1_aggressive": {
         "base_qty":           0.05,
@@ -351,20 +363,13 @@ class TrendBot(BotInterface):
             if rsi < entry_rsi_min:
                 _g["entry_rsi_min"] += 1
                 continue
-            
-            # ── ATR floor filter ─────────────────────────────────────────────
-            # Require ATR% at entry exceeds threshold. Filters low-volatility
-            # STRONG windows (T03/T04/T05 ~0.5% ATR) while passing high-ATR
-            # STRONG windows (T12 ~1.2% ATR) and PARABOLIC windows.
-            # Hypothesis: STRONG entries in low-ATR environments stagnate and
-            # time_stop repeatedly; high-ATR environments have enough velocity
-            # to reach target within the hold window.
+
+            # ── ATR floor filter ──────────────────────────────────────
             entry_min_atr_pct = p.get("entry_min_atr_pct", 0.0)
             if entry_min_atr_pct > 0.0:
                 entry_atr = float(row.get("atr_pct", 0.0))
                 if entry_atr < entry_min_atr_pct:
                     continue
-            # ─────────────────────────────────────────────────────────────────
 
             # ── RSI lookback (confirm pullback, not breakdown) ────────
             rsi_lookback = df["rsi"].iloc[max(0, i-24):i]
@@ -407,7 +412,7 @@ class TrendBot(BotInterface):
                 ("open_position", "position open"),
                 ("regime",        "regime not BULL/RECOVERY"),
                 ("stable_bars",   f"trend_streak < {p.get('regime_stable_bars',0)} (stable_bars)"),
-                ("macro_context", f"macro_context: >{p.get('macro_bearish_max',0.6):.0%} bearish"),
+                ("macro_context", f"macro_context: >{p.get('macro_bearish_max',0.6):.0%} bearish in last {p.get('macro_context_bars',0)} bars"),
                 ("macro_dd",      f"macro_dd < {p.get('macro_dd_skip','off')}"),
                 ("strength",      f"strength not in {strength_allowed}"),
                 ("rsi_nan",       "RSI NaN"),
