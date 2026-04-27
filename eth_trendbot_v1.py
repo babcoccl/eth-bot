@@ -191,6 +191,12 @@ v1 history:
              48-bar (4h) window covers the full RECOVERY oscillation cycle.
              BULL behavior is unchanged. Diagnostic label updated to show
              regime-conditional window size.
+  r15      — Harness-only additions: H7 (concentration risk — no single window
+             >60% of total PnL), H8 (time-stop exits net PnL >= -$0.10/trade),
+             H9 (PSL cooldown enforced — no back-to-back PSLs within 8h).
+             Bot change: _build_result now exposes time_stop_fires and
+             time_stop_pnl in the stats dict so H8 can read them.
+             No preset or gate changes.
 """
 
 import warnings
@@ -694,6 +700,7 @@ class TrendBot(BotInterface):
         wins  = real[real["pnl_after_fees"] > 0]
         psl_r = real[real["reason"] == "pos_stop_loss"]
         tgt_r = real[real["reason"] == "target"]
+        ts_r  = real[real["reason"] == "time_stop"]
 
         return tdf, {
             "preset":        preset_name,
@@ -709,6 +716,8 @@ class TrendBot(BotInterface):
             "target_pnl":    float(tgt_r["pnl_after_fees"].sum()),
             "psl_fires":     len(psl_r),
             "psl_pnl":       float(psl_r["pnl_after_fees"].sum()),
+            "time_stop_fires": len(ts_r),
+            "time_stop_pnl":   float(ts_r["pnl_after_fees"].sum()),
             "eop_pnl":       float(sells[sells["reason"] == "end_of_period"]["pnl_after_fees"].sum()),
             "avg_bars_held": float(real["bars_held"].mean()) if len(real) > 0 else 0,
         }

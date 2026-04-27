@@ -14,6 +14,9 @@ Hypotheses:
   H5  avg_bars_held >= 3 on target exits (should hold briefly, not scalp)
   H6  STRONG windows produce higher PnL-per-trade than MODERATE windows
       (qty_scale is 0.5x for MODERATE -- compare quality, not activity count)
+  H7  concentration: no single window > 60% of total PnL
+  H8  time-stop net PnL >= -$0.10/trade
+  H9  PSL cooldown enforced (no back-to-back PSLs within 8h)
 
 Known-limitation windows (accepted no-edge cases -- do not tune for these):
   #2023-01 (Jan 2023): post-2022-bear RECOVERY, ETH ~70% below 90d peak.
@@ -54,6 +57,16 @@ r13 harness changes:
     Both windows pass gate qualifiers but have microstructures incompatible
     with the pullback signal design. Documented to prevent future tuning
     attempts for these specific windows.
+
+r15 harness changes:
+  - H7 added: concentration risk guard. No single window should account for
+    >60% of total PnL. Prevents over-reliance on one strong period.
+  - H8 added: time-stop exits must be net-neutral or better (avg PnL >= -$0.10
+    per time-stop trade). Requires time_stop_fires/time_stop_pnl from bot
+    _build_result (also added in r15).
+  - H9 added: PSL cooldown enforcement check. Verifies no two pos_stop_loss
+    exits occur within psl_cooldown_secs (28800s = 8h) of each other across
+    the combined trades output. Structural invariant, not a tuning target.
 """
 
 import argparse, sys, os, warnings
@@ -324,6 +337,50 @@ def print_results(results, capital, preset_name):
          f"(${strong_pnl_per_trade:+.2f} vs ${mod_pnl_per_trade:+.2f})",
          strong_pnl_per_trade > mod_pnl_per_trade,
          f"({len(strong)} strong / {len(moderate)} mod windows)")
+
+    # H7 — Concentration risk: no single window > 60% of total PnL
+    if total_pnl > 0 and valid:
+        max_window_pnl = max(r.get("realized_pnl", 0) for r in valid)
+        concentration  = max_window_pnl / total_pnl
+        h7_pass = concentration < 0.60
+    else:
+        concentration = 0.0
+        h7_pass = True  # trivially pass if no positive PnL
+    show(f"H7  no single window > 60% of total PnL (max={concentration:.1%})",
+         h7_pass)
+
+    # H8 — Time-stop exits are net-neutral or better (avg PnL >= -$0.10/trade)
+    total_ts_fires = sum(r.get("time_stop_fires", 0) for r in valid)
+    total_ts_pnl   = sum(r.get("time_stop_pnl", 0.0) for r in valid)
+    if total_ts_fires > 0:
+        ts_avg_pnl = total_ts_pnl / total_ts_fires
+        h8_pass = ts_avg_pnl >= -0.10
+    else:
+        ts_avg_pnl = 0.0
+        h8_pass = True  # trivially pass if no time-stop exits
+    show(f"H8  time-stop avg PnL >= -$0.10/trade "
+         f"(${ts_avg_pnl:+.2f}, {total_ts_fires} fires)",
+         h8_pass)
+
+    # H9 — PSL cooldown enforced: no two PSL exits within psl_cooldown_secs
+    # Checked per-window (each window is an independent bot run; cross-window
+    # PSL exits are unrelated — overlapping windows share bars but not state).
+    psl_cooldown_secs = 28800  # 8h — matches bot preset psl_cooldown_secs
+    back_to_back = 0
+    for _, tdf_h, s_h in results:
+        if not (s_h and tdf_h is not None and isinstance(tdf_h, pd.DataFrame) and not tdf_h.empty):
+            continue
+        psl_sells = tdf_h[(tdf_h["side"] == "SELL") &
+                          (tdf_h["reason"] == "pos_stop_loss")].copy()
+        psl_sells = psl_sells.sort_values("ts").reset_index(drop=True)
+        for j in range(1, len(psl_sells)):
+            gap = (psl_sells["ts"].iloc[j] - psl_sells["ts"].iloc[j - 1]).total_seconds()
+            if gap < psl_cooldown_secs:
+                back_to_back += 1
+    h9_pass = back_to_back == 0
+    show(f"H9  PSL cooldown enforced (no back-to-back PSLs within 8h)",
+         h9_pass,
+         f"({back_to_back} violations)" if not h9_pass else "")
 
     print(f"\n  Total realized PnL: ${total_pnl:+.2f}")
     print(sep)
