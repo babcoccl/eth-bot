@@ -120,6 +120,21 @@ v1 history:
              in #2023-01 after the macro_dd fix. Two distinct market microstructures
              require two distinct RSI thresholds; this is structural, not overfit.
              BULL bars continue to use uptrend_rsi_max = 38.
+  r11      — uptrend_rsi_recovery_max removed. r10 doubled trade count in
+             RECOVERY-heavy windows but cut WR sharply (#2021-04: 80%→50%,
+             #2025-07: 100%→40%, #2024-11: 80%→57%). The RSI 40-48 ceiling
+             was admitting momentum-phase entries (RSI rising through 40-48),
+             not genuine pullback troughs. The zscore and vol gates do not
+             compensate for this — a momentum entry can easily pass both.
+             Both BULL and RECOVERY bars revert to uptrend_rsi_max = 38.
+             macro_dd_skip RECOVERY exemption from r10 is retained — that
+             change is structurally correct and orthogonal to the RSI issue.
+             Known limitation: #2023-01 (Jan 2023, post-2022-bear RECOVERY)
+             produces 0 trades after r11. ETH was ~70% below its 90d peak
+             and RSI dynamics in that window do not produce sub-38 oversold
+             pullbacks. This is the correct outcome — the pullback signal
+             design does not match post-crash RSI microstructure. Document
+             and do not continue tuning for this edge case.
 """
 
 import warnings
@@ -135,8 +150,7 @@ PRESETS = {
     "trendbot_v1": {
         "base_qty":                   0.05,
         "pos_stop_loss_pct":          0.025,    # 250bps — empirically derived; break-even at 60% WR
-        "uptrend_rsi_max":            38,        # RSI ceiling for BULL-regime bars
-        "uptrend_rsi_recovery_max":   48,        # r10: looser RSI ceiling for RECOVERY-regime bars
+        "uptrend_rsi_max":            38,        # RSI ceiling for both BULL and RECOVERY bars
         "vol_mult_min":               1.30,      # r8: reverted from r7's 1.50 back to r6 level
         "cooldown_secs":              14400,
         "psl_cooldown_secs":          28800,     # 8h lockout after any stop-loss exit
@@ -250,7 +264,6 @@ class TrendBot(BotInterface):
         target_bps       = p["target_bps"]
         psl_pct          = p["pos_stop_loss_pct"]
         rsi_max          = p["uptrend_rsi_max"]
-        rsi_recovery_max = p.get("uptrend_rsi_recovery_max", rsi_max)
         vol_min          = p["vol_mult_min"]
         cooldown         = p["cooldown_secs"]
         psl_cooldown     = p.get("psl_cooldown_secs", cooldown)
@@ -275,7 +288,7 @@ class TrendBot(BotInterface):
             "entry_rsi_min":  0,  # RSI below entry_rsi_min floor
             "rsi_lookback":   0,  # no RSI > 55 in last 24 bars
             # signal sub-gates (only counted when all prior gates pass)
-            "sig_rsi":        0,  # rsi >= rsi_ceiling OR not turning up
+            "sig_rsi":        0,  # rsi >= rsi_max or not turning up
             "sig_zscore":     0,  # zscore >= zscore_max
             "sig_vol":        0,  # vol_ratio < vol_min
             "entered":        0,  # bars where a trade was opened
@@ -426,14 +439,11 @@ class TrendBot(BotInterface):
                 continue
 
             # ── Signal: RSI + z-score + volume ───────────────────────
-            # r10: regime-aware RSI ceiling.
-            # BULL bars use uptrend_rsi_max (38) — gradual uptrend, shallow
-            # pullbacks, RSI oscillates 28-45.
-            # RECOVERY bars use uptrend_rsi_recovery_max (48) — momentum bounce
-            # from deeply oversold levels, RSI oscillates 45-65, tighter 38
-            # ceiling was structurally blocking all entries in post-crash
-            # RECOVERY windows (e.g. #2023-01: 3,762 bars blocked).
-            rsi_ceiling = rsi_recovery_max if regime5 == "RECOVERY" else rsi_max
+            # r11: unified RSI ceiling for both BULL and RECOVERY bars.
+            # uptrend_rsi_max = 38 applies to all regime5 values.
+            # r10's uptrend_rsi_recovery_max = 48 admitted momentum-phase
+            # entries (RSI 40-48 rising) rather than genuine pullback troughs,
+            # cutting WR sharply across RECOVERY-heavy windows.
 
             # r9: adaptive rsi_turning_up based on depth of prior RSI drop.
             # Require double-bar confirmation when drop was steep (>= 2.0 RSI pts);
@@ -445,7 +455,7 @@ class TrendBot(BotInterface):
             )
 
             # Evaluate sub-gates individually for diagnostics
-            rsi_pass    = (rsi < rsi_ceiling) and rsi_turning_up
+            rsi_pass    = (rsi < rsi_max) and rsi_turning_up
             zscore_pass = zscore < zscore_max
             vol_pass    = vol_r >= vol_min
 
@@ -491,7 +501,7 @@ class TrendBot(BotInterface):
                 ("psl_cooldown",  "PSL cooldown"),
                 ("entry_rsi_min", f"RSI < {p.get('entry_rsi_min',0)} (entry_rsi_min)"),
                 ("rsi_lookback",  "rsi_lookback: no RSI>55 in last 24 bars"),
-                ("sig_rsi",       f"signal.rsi: rsi >= rsi_ceiling or not turning up (adaptive; BULL<{rsi_max} RECOV<{rsi_recovery_max})"),
+                ("sig_rsi",       f"signal.rsi: rsi >= rsi_max or not turning up (adaptive)"),
                 ("sig_zscore",    f"signal.zscore: zscore >= {zscore_max} (not oversold enough)"),
                 ("sig_vol",       f"signal.vol: vol_ratio < {vol_min} (insufficient volume)"),
             ]
