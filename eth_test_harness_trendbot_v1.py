@@ -22,6 +22,9 @@ Notes:
   - lookback=180d: MacroSupervisor needs ~180d of history before window start
     for peak_window (720 h1 bars=30d), EMA, and RSI to be properly warmed up.
     Using 30d caused cold-start misclassification (everything showed as CRASH).
+  - Regime gate is computed over the trend window only [start, trend_end],
+    NOT the full extended run [start, trend_end+max_hold_days]. The extension
+    exists solely to let open trades close naturally after the trend ends.
 """
 
 import argparse, sys, os, warnings
@@ -71,6 +74,7 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60,
 
         df_ind = prepare_indicators(df5, df1h, min_dwell=min_dwell)
 
+        # Full run slice (window start -> trend_end + extension) used by the bot
         df_run = df_ind[df_ind["ts"] >= pd.Timestamp(start_dt)].reset_index(drop=True)
 
         if len(df_run) < 10:
@@ -79,18 +83,24 @@ def run_window(symbol, window, capital, preset_name, max_hold_days=60,
         if shift > 0:
             print(f"    [shift+{shift}d] {window['label']} resolved at {start_dt.date()}")
 
-        # -- Regime distribution diagnostic ------------------------------------
-        regime_dist    = df_run["regime5"].value_counts(normalize=True).to_dict()
-        tradeable_pct  = regime_dist.get("BULL", 0) + regime_dist.get("RECOVERY", 0)
-        print(f"  [regime dist] {window['label']}: tradeable={tradeable_pct:.1%} "
-              f"| {', '.join(f'{k}={v:.1%}' for k, v in sorted(regime_dist.items()))}")
+        # -- Regime gate: computed over TREND WINDOW ONLY [start, trend_end] --
+        # The extension (max_hold_days) exists so open trades can close after the
+        # trend ends. Computing the gate over the full run would include post-trend
+        # CRASH bars and incorrectly disqualify clean windows.
+        df_gate = df_run[df_run["ts"] <= pd.Timestamp(trend_end)]
 
-        bull_recov_pct = (
-            (df_run["regime5"].isin(["BULL", "RECOVERY"])).sum() / len(df_run)
-        )
-        hostile_pct = (
-            (df_run["regime5"].isin(["CRASH", "CORRECTION"])).sum() / len(df_run)
-        )
+        if len(df_gate) < 10:
+            print(f"  [{window['label']}]  skipped (too few bars in trend window)")
+            return window["label"], pd.DataFrame(), {}
+
+        regime_dist    = df_gate["regime5"].value_counts(normalize=True).to_dict()
+        tradeable_pct  = regime_dist.get("BULL", 0) + regime_dist.get("RECOVERY", 0)
+        bull_recov_pct = tradeable_pct
+        hostile_pct    = regime_dist.get("CRASH", 0) + regime_dist.get("CORRECTION", 0)
+
+        print(f"  [regime dist] {window['label']}: tradeable={tradeable_pct:.1%} "
+              f"hostile={hostile_pct:.1%} "
+              f"| {', '.join(f'{k}={v:.1%}' for k, v in sorted(regime_dist.items()))}")
 
         if bull_recov_pct < _MIN_BULL_RECOV_PCT:
             print(f"  [{window['label']}]  skipped "
