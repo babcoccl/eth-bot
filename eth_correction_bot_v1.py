@@ -35,7 +35,6 @@ Supported regimes: CORRECTION, RANGE (shallow dips in ranging markets)
 """
 
 import warnings
-import numpy as np
 import pandas as pd
 from typing import List
 
