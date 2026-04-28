@@ -100,12 +100,12 @@ def calc_atr(high, low, close, period=14):
 
 
 def calc_bollinger(close, window=20, std_mult=2.0):
-    mid   = close.rolling(window).mean()
-    std   = close.rolling(window).std()
-    upper = mid + std_mult * std
-    lower = mid - std_mult * std
-    bw    = (upper - lower) / mid.replace(0, np.nan)
-    return upper, mid, lower, bw
+    ma = close.rolling(window).mean()
+    std = close.rolling(window).std(ddof=0)
+    upper = ma + (std * std_mult)
+    lower = ma - (std * std_mult)
+    # Return only bandwidth for feature set
+    return (upper - lower) / ma.replace(0, np.nan)
 
 
 def calc_zscore(close, window=24):
@@ -267,11 +267,15 @@ def prepare_indicators(df5, df1h, min_dwell=3):
     d["macro_dd_pct"]     = (d["close"] - d["rolling_90d_high"]) / d["rolling_90d_high"]
     d["zscore"]   = calc_zscore(d["close"], IND["zscore_window"])
 
-    bb_u, bb_m, bb_l, bw = calc_bollinger(d["close"], IND["bb_window"], IND["bb_std"])
-    d["bb_upper"] = bb_u
-    d["bb_mid"]   = bb_m
-    d["bb_lower"] = bb_l
-    d["bw_pct"]   = bw
+    # Maintaining individual BB columns for backtest compatibility
+    ma  = d["close"].rolling(IND["bb_window"]).mean()
+    std = d["close"].rolling(IND["bb_window"]).std(ddof=0)
+    upper = ma + (std * IND["bb_std"])
+    lower = ma - (std * IND["bb_std"])
+    d["bb_upper"] = upper
+    d["bb_mid"]   = ma
+    d["bb_lower"] = lower
+    d["bw_pct"]   = (upper - lower) / ma.replace(0, np.nan)
 
     d["fast_ma"]       = d["close"].ewm(span=IND["regime_fast"], adjust=False).mean()
     d["slow_ma"]       = d["close"].ewm(span=IND["regime_slow"], adjust=False).mean()
