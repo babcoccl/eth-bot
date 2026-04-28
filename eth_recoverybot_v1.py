@@ -93,8 +93,7 @@ class RecoveryBot(BotInterface):
         self._cumulative   = 0.0
         self._last_trade_ts = None
 
-    def _sell_short(self, i, df, fill_price, reason, base_qty, fee_pct):
-        row = df.iloc[i]
+    def _sell_short(self, i, ts, regime_h1, rsi, fill_price, reason, base_qty, fee_pct):
         # To short, we need margin. We assume 1x leverage, meaning we need cash >= short value.
         sv = base_qty * fill_price
         if sv > self._cash:
@@ -105,25 +104,24 @@ class RecoveryBot(BotInterface):
         self._position.qty = base_qty
         self._position.avg_entry = fill_price
         self._position.entry_bar = i
-        self._position.lots = [Lot(qty=base_qty, price=fill_price, fee=fee, ts=row["ts"], row_idx=len(self._trades))]
-        self._last_trade_ts = row["ts"]
+        self._position.lots = [Lot(qty=base_qty, price=fill_price, fee=fee, ts=ts, row_idx=len(self._trades))]
+        self._last_trade_ts = ts
         
         self._trades.append({
-            "ts": row["ts"], "side": "SELL_SHORT", "reason": reason,
-            "regime_h1": str(row.get("regime_h1", "")),
+            "ts": ts, "side": "SELL_SHORT", "reason": reason,
+            "regime_h1": str(regime_h1),
             "price": fill_price, "qty": base_qty, "fee": fee,
-            "rsi": float(row.get("rsi", float("nan"))),
+            "rsi": float(rsi),
             "pnl": 0.0, "pnl_after_fees": 0.0, "win": float("nan"),
             "bars_held": float("nan"), "exit_price": float("nan"),
         })
         return True
 
-    def _buy_to_cover(self, i, df, fill_price, reason, fee_pct):
+    def _buy_to_cover(self, i, ts, regime_h1, rsi, fill_price, reason, fee_pct):
         p = self._position
         if not p.is_open:
             return False
             
-        row = df.iloc[i]
         lot = p.lots[0]
         
         # PnL logic for Short: (Entry - Exit) * Qty
@@ -146,10 +144,10 @@ class RecoveryBot(BotInterface):
         })
         
         self._trades.append({
-            "ts": row["ts"], "side": "BUY_COVER", "reason": reason,
-            "regime_h1": str(row.get("regime_h1", "")),
+            "ts": ts, "side": "BUY_COVER", "reason": reason,
+            "regime_h1": str(regime_h1),
             "price": fill_price, "qty": p.qty, "fee": exit_fee,
-            "rsi": float(row.get("rsi", float("nan"))),
+            "rsi": float(rsi),
             "pnl": net_pnl, "pnl_after_fees": net_pnl,
             "win": 1.0 if net_pnl > 0 else 0.0,
             "bars_held": bh, "exit_price": float("nan"),
@@ -170,23 +168,33 @@ class RecoveryBot(BotInterface):
         f_stop       = p["fib_stop"]
         max_hold     = p["max_hold_bars"]
 
-        # Convert to numpy for fast window slicing if necessary, but iloc is okay for now
-        # Actually, using rolling max/min over the whole DataFrame is much faster.
-        # Let's precalculate macro_peak and macro_low to avoid slow slicing in the loop!
-        
         # We need rolling max high over lookback bars
         df["rolling_high"] = df["high"].rolling(window=lookback, min_periods=1).max()
-        # We need the lowest low since that high. This is tricky with vectorization because the anchor shifts.
-        # It's better to do it in the loop, or optimize it. Since we only check it when not in position, it's fine.
+
+        # Extract columns to numpy arrays for speed
+        ts_arr      = df["ts"].values
+        regime_arr  = df["regime5"].values.astype(str) if "regime5" in df.columns else np.full(len(df), "RANGE")
+        low_arr     = df["low"].values.astype(float)
+        high_arr    = df["high"].values.astype(float)
+        close_arr   = df["close"].values.astype(float)
+        open_arr    = df["open"].values.astype(float)
+        roll_hi_arr = df["rolling_high"].values.astype(float)
+
+        # Optional columns
+        regime_h1_arr = df["regime_h1"].values.astype(str) if "regime_h1" in df.columns else np.full(len(df), "")
+        rsi_arr       = df["rsi"].values.astype(float) if "rsi" in df.columns else np.full(len(df), np.nan)
+        vol_ratio_arr = df["vol_ratio"].values.astype(float) if "vol_ratio" in df.columns else np.full(len(df), 1.0)
 
         for i in range(len(df)):
-            row    = df.iloc[i]
-            ts     = row["ts"]
-            regime = str(row.get("regime5", "RANGE"))
-            low    = float(row["low"])
-            high   = float(row["high"])
-            close  = float(row["close"])
-            open_p = float(row["open"])
+            ts      = ts_arr[i]
+            regime  = regime_arr[i]
+            low     = low_arr[i]
+            high    = high_arr[i]
+            close   = close_arr[i]
+            open_p  = open_arr[i]
+
+            regime_h1 = regime_h1_arr[i]
+            rsi       = rsi_arr[i]
 
             unreal = self._position.unrealized_pnl(close, fee_pct)
             self._equity_curve.append(self._cash + unreal)
@@ -195,36 +203,35 @@ class RecoveryBot(BotInterface):
                 bh = i - self._position.entry_bar
                 
                 if high >= getattr(self, "_active_fib_stop", 999999):
-                    self._buy_to_cover(i, df, getattr(self, "_active_fib_stop", high), "stop_loss_fib", fee_pct)
+                    self._buy_to_cover(i, ts, regime_h1, rsi, getattr(self, "_active_fib_stop", high), "stop_loss_fib", fee_pct)
                     continue
                     
                 if low <= getattr(self, "_active_macro_low", 0):
-                    self._buy_to_cover(i, df, getattr(self, "_active_macro_low", low), "target_macro_low", fee_pct)
+                    self._buy_to_cover(i, ts, regime_h1, rsi, getattr(self, "_active_macro_low", low), "target_macro_low", fee_pct)
                     continue
                     
                 if bh >= max_hold:
-                    self._buy_to_cover(i, df, close, "time_stop", fee_pct)
+                    self._buy_to_cover(i, ts, regime_h1, rsi, close, "time_stop", fee_pct)
                     continue
                     
+                continue
+
+            if i < lookback:
                 continue
 
             if regime not in self.supported_regimes:
                 continue
-                
-            if i < lookback:
-                continue
 
             # Optimization: only recalculate if current high is in a reasonable range to be a fib
             # Using rolling_high is fast.
-            macro_peak = float(df["rolling_high"].iat[i])
+            macro_peak = roll_hi_arr[i]
             # Find when that peak occurred in the window
-            window_high = df["high"].iloc[i-lookback:i+1]
-            # idxmax can be slow. Let's do it simply:
-            peak_idx = window_high.values.argmax() + (i - lookback)
+            window_high = high_arr[i-lookback:i+1]
+            peak_idx = window_high.argmax() + (i - lookback)
             if peak_idx >= i:
                 continue # Peak is right now
                 
-            macro_low = float(df["low"].iloc[peak_idx:i+1].min())
+            macro_low = low_arr[peak_idx:i+1].min()
             
             drop_pct = (macro_peak - macro_low) / macro_peak
             if drop_pct < min_drop:
@@ -238,14 +245,15 @@ class RecoveryBot(BotInterface):
             # Entry condition: Retest 0.382 - 0.50 zone
             if high >= fib_382 and close <= fib_500:
                 if close < open_p: # Close red
-                    vol_r = float(row.get("vol_ratio", 1.0))
+                    vol_r = vol_ratio_arr[i]
                     if vol_r <= vol_max: # Weak volume
-                        if self._sell_short(i, df, close, "dcb_short", base_qty, fee_pct):
+                        if self._sell_short(i, ts, regime_h1, rsi, close, "dcb_short", base_qty, fee_pct):
                             self._active_macro_low = macro_low
                             self._active_fib_stop  = fib_786
 
         if self._position.is_open:
-            self._buy_to_cover(len(df)-1, df, float(df.iloc[-1]["close"]), "end_of_period", fee_pct)
+            last_idx = len(df) - 1
+            self._buy_to_cover(last_idx, ts_arr[last_idx], regime_h1_arr[last_idx], rsi_arr[last_idx], close_arr[last_idx], "end_of_period", fee_pct)
 
         return self._build_result(capital, preset_name)
 
