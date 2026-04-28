@@ -76,30 +76,34 @@ def run_cycle(cy, symbol, corr_preset, trend_preset, conviction_override=1.0):
         # For v2, let's just use the full df_ann and let bots filter by regime
         
         # --- Tactical Bot Execution ---
+        # Note: We now pass BASE_CAPITAL and the supervisor. 
+        # The bots will call supervisor.request_allocation() to handle conviction-based scaling
+        # and budget enforcement internally (v32 Orchestrator Logic).
+        
         # 1. CorrectionBot
         cp = CORR_PRESETS[corr_preset]
         corr_bot = CorrectionBot(symbol=symbol.replace("/", "-"))
-        _, corr_stats = corr_bot.run_backtest(df_ann.copy(), cp, scaled_capital, corr_preset)
+        _, corr_stats = corr_bot.run_backtest(df_ann.copy(), cp, BASE_CAPITAL, corr_preset, supervisor=sup)
         
         # 2. TrendBot (special handling for skip logic)
         tp = TREND_PRESETS[trend_preset]
         trend_bot = TrendBot(symbol=symbol.replace("/", "-"))
-        _, trend_stats = trend_bot.run_backtest(df_ann.copy(), tp, scaled_capital, trend_preset)
+        _, trend_stats = trend_bot.run_backtest(df_ann.copy(), tp, BASE_CAPITAL, trend_preset, supervisor=sup)
         
         # 3. RangeBot (Grid)
         rp = RANGE_PRESETS["grid_v1"]
         range_bot = RangeBot(symbol=symbol.replace("/", "-"))
-        _, range_stats = range_bot.run_backtest(df_ann.copy(), rp, scaled_capital, "grid_v1")
+        _, range_stats = range_bot.run_backtest(df_ann.copy(), rp, BASE_CAPITAL, "grid_v1", supervisor=sup)
         
         # 4. RecoveryBot (DCB)
         rec_p = RECOVERY_PRESETS["dcb_v2_optimized"]
         rec_bot = RecoveryBot(symbol=symbol.replace("/", "-"))
-        _, rec_stats = rec_bot.run_backtest(df_ann.copy(), rec_p, scaled_capital, "dcb_v2_optimized")
+        _, rec_stats = rec_bot.run_backtest(df_ann.copy(), rec_p, BASE_CAPITAL, "dcb_v2_optimized", supervisor=sup)
         
         # 5. HedgeBot (Futures)
         hp = HEDGE_PRESETS["hedge_v2_optimized"]
         hedge_bot = HedgeBot(symbol=symbol.replace("/", "-"))
-        _, hedge_stats = hedge_bot.run_backtest(df_ann.copy(), hp, scaled_capital, "hedge_v2_optimized")
+        _, hedge_stats = hedge_bot.run_backtest(df_ann.copy(), hp, BASE_CAPITAL, "hedge_v2_optimized", supervisor=sup)
         
         # --- Totals ---
         cpnl = corr_stats.get("realized_pnl", 0.0)

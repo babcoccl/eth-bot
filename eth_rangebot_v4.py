@@ -107,6 +107,18 @@ class RangeBot(BotInterface):
             supported_regimes = self.supported_regimes,
         )
 
+    def get_recent_trades(self, n=5) -> list:
+        return self._trades[-n:] if self._trades else []
+
+    def get_state_summary(self) -> dict:
+        return {
+            "bot_id": self.bot_id,
+            "equity": self._cash + self._position.qty * self._position.avg_entry if self._position.is_open else self._cash,
+            "realized_pnl": self._realized_pnl,
+            "active_position": self._position.is_open,
+            "grid_levels": len(self._buy_levels) + len(self._sell_levels),
+        }
+
     def _reset(self, capital: float) -> None:
         self._cash         = float(capital)
         self._capital      = float(capital)
@@ -118,7 +130,7 @@ class RangeBot(BotInterface):
         self._buy_levels   = []
         self._sell_levels  = []
 
-    def run_backtest(self, df: pd.DataFrame, preset: dict, capital: float, preset_name: str) -> tuple:
+    def run_backtest(self, df: pd.DataFrame, preset: dict, capital: float, preset_name: str, supervisor=None) -> tuple:
         self._reset(capital)
         p = preset
         fee_pct      = p["fee_pct"]
@@ -141,7 +153,7 @@ class RangeBot(BotInterface):
             if self._position.is_open:
                 unreal = (close - self._position.avg_entry) / self._position.avg_entry if self._position.avg_entry > 0 else 0
                 if unreal < -psl_pct:
-                    self._sell_all(i, df, close, "pos_stop_loss", fee_pct)
+                    self._sell_all(i, df, close, "pos_stop_loss", fee_pct, supervisor=supervisor)
                     self._grid_active = False
                     self._buy_levels = []
                     self._sell_levels = []
@@ -151,7 +163,7 @@ class RangeBot(BotInterface):
             if regime not in self.supported_regimes:
                 if self._grid_active:
                     if self._position.is_open:
-                        self._sell_all(i, df, close, "regime_exit", fee_pct)
+                        self._sell_all(i, df, close, "regime_exit", fee_pct, supervisor=supervisor)
                     self._grid_active = False
                     self._buy_levels = []
                     self._sell_levels = []
@@ -165,7 +177,7 @@ class RangeBot(BotInterface):
             if abs(trend_str) > drift_thresh:
                 if self._grid_active:
                     if self._position.is_open:
-                        self._sell_all(i, df, close, "drift_exit", fee_pct)
+                        self._sell_all(i, df, close, "drift_exit", fee_pct, supervisor=supervisor)
                     self._grid_active = False
                     self._buy_levels = []
                     self._sell_levels = []
@@ -189,14 +201,14 @@ class RangeBot(BotInterface):
             # 1. Check buys
             for bl in sorted(self._buy_levels, reverse=True): # highest buys hit first
                 if low <= bl:
-                    if self._buy_lot(i, df, bl, "grid_buy", base_qty, fee_pct):
+                    if self._buy_lot(i, df, bl, "grid_buy", base_qty, fee_pct, supervisor=supervisor):
                         self._buy_levels.remove(bl)
                         self._sell_levels.append(bl + self._grid_step)
             
             # 2. Check sells
             for sl in sorted(self._sell_levels): # lowest sells hit first
                 if high >= sl:
-                    if self._sell_lot(i, df, sl, "grid_sell", fee_pct):
+                    if self._sell_lot(i, df, sl, "grid_sell", fee_pct, supervisor=supervisor):
                         self._sell_levels.remove(sl)
                         self._buy_levels.append(sl - self._grid_step)
 
@@ -205,9 +217,20 @@ class RangeBot(BotInterface):
 
         return self._build_result(capital, preset_name)
 
-    def _buy_lot(self, i, df, fill_price, reason, base_qty, fee_pct) -> bool:
+    def _buy_lot(self, i, df, fill_price, reason, base_qty, fee_pct, supervisor=None) -> bool:
         row = df.iloc[i]
         bv  = base_qty * fill_price
+        
+        # Risk Check (v32)
+        if supervisor:
+            allowed_bv = supervisor.request_allocation(self.bot_id, bv)
+            if allowed_bv < bv:
+                if allowed_bv < 1.0: # Too small to trade
+                    return False
+                # Adjust base_qty to match allowed budget
+                base_qty = allowed_bv / fill_price
+                bv  = base_qty * fill_price
+
         if bv > self._cash:
             return False # insufficient cash for this grid level
 
@@ -222,6 +245,10 @@ class RangeBot(BotInterface):
         lot = Lot(qty=base_qty, price=fill_price, fee=fee, ts=row["ts"], row_idx=len(self._trades))
         self._position.lots.append(lot)
         
+        # Update Supervisor (v32)
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, self._position.cost_basis)
+
         self._trades.append({
             "ts": row["ts"], "side": "BUY", "reason": reason,
             "regime_h1": str(row.get("regime_h1", "")),
@@ -234,7 +261,7 @@ class RangeBot(BotInterface):
         self.save_to_disk()
         return True
 
-    def _sell_lot(self, i, df, fill_price, reason, fee_pct) -> bool:
+    def _sell_lot(self, i, df, fill_price, reason, fee_pct, supervisor=None) -> bool:
         if not self._position.lots:
             return False
         
@@ -255,6 +282,10 @@ class RangeBot(BotInterface):
         self._realized_pnl += pnl
         self._trade_count += 1
         
+        # Update Supervisor (v32)
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, self._position.cost_basis)
+
         bh = i - lot.row_idx # approx bars held since that buy
         buy_row = self._trades[lot.row_idx]
         buy_row.update({
@@ -275,9 +306,9 @@ class RangeBot(BotInterface):
         })
         return True
 
-    def _sell_all(self, i, df, fill_price, reason, fee_pct):
+    def _sell_all(self, i, df, fill_price, reason, fee_pct, supervisor=None):
         while self._position.lots:
-            self._sell_lot(i, df, fill_price, reason, fee_pct)
+            self._sell_lot(i, df, fill_price, reason, fee_pct, supervisor=supervisor)
 
     def _build_result(self, capital: float, preset_name: str) -> tuple:
         if not self._trades:

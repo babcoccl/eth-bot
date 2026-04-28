@@ -183,6 +183,7 @@ class CorrectionBot(BotInterface):
         preset_name: str,
         df_warm: pd.DataFrame = None,
         correction_end_ts=None,
+        supervisor=None,
     ) -> tuple:
         """
         Run CorrectionBot over a correction window + recovery hold period.
@@ -228,19 +229,19 @@ class CorrectionBot(BotInterface):
 
                 # Profit target
                 if dd >= profit_target:
-                    self._sell(i, df, close, "profit_target", fee_pct)
+                    self._sell(i, df, close, "profit_target", fee_pct, supervisor=supervisor)
                     self._state = "DONE"
                     continue
 
                 # Hard stop-loss — correction has become a crash; hand off to CrashAccumulator
                 if dd <= -stop_loss:
-                    self._sell(i, df, close, "stop_loss", fee_pct)
+                    self._sell(i, df, close, "stop_loss", fee_pct, supervisor=supervisor)
                     self._state = "STOPPED"
                     continue
 
                 # Time-stop
                 if (i - self._hold_start_bar) > max_hold_bars:
-                    self._sell(i, df, close, "time_stop", fee_pct)
+                    self._sell(i, df, close, "time_stop", fee_pct, supervisor=supervisor)
                     self._state = "DONE"
                     continue
 
@@ -291,6 +292,15 @@ class CorrectionBot(BotInterface):
                 max_deploy - self._total_spent,
                 self._cash * 0.95,
             )
+            
+            # Risk Check (v32)
+            if supervisor:
+                allowed_spend = supervisor.request_allocation(self.bot_id, spend)
+                if allowed_spend < spend:
+                    if allowed_spend < 1.0: # Too small
+                        continue
+                    spend = allowed_spend
+
             if spend < 1.0:
                 continue
 
@@ -319,10 +329,14 @@ class CorrectionBot(BotInterface):
                 "total_spent": self._total_spent, "pnl": 0.0,
             })
             self._trade_count += 1
+            
+            # Update Supervisor (v32)
+            if supervisor:
+                supervisor.update_bot_status_realtime(self.bot_id, self._total_spent)
 
         return self._build_result(capital, preset_name)
 
-    def _sell(self, i, df, close, reason, fee_pct):
+    def _sell(self, i, df, close, reason, fee_pct, supervisor=None):
         if not self._position.is_open:
             return
         sell_val = self._position.qty * close
@@ -341,6 +355,10 @@ class CorrectionBot(BotInterface):
         self._total_deployed_ever += self._total_spent
         self._total_spent    = 0.0
         self._hold_start_bar = None
+        
+        # Update Supervisor (v32)
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, 0.0)
 
     def _reset(self, capital: float) -> None:
         self._cash                   = float(capital)

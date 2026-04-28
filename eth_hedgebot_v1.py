@@ -44,7 +44,7 @@ class HedgeBot(BotInterface):
         
     @property
     def bot_id(self) -> str:
-        return "hedgebot_v1"
+        return f"hedgebot_{self._symbol.lower().replace('-', '_')}"
 
     @property
     def supported_regimes(self) -> list:
@@ -75,7 +75,7 @@ class HedgeBot(BotInterface):
         self._equity_curve = []
         
     def run_backtest(self, df: pd.DataFrame, params: Dict[str, Any], 
-                     capital: float, preset_name: str = "custom") -> tuple:
+                     capital: float, preset_name: str = "custom", supervisor=None) -> tuple:
         self._reset(capital)
         
         hedge_ratio = params.get("hedge_ratio", 0.5)
@@ -100,18 +100,31 @@ class HedgeBot(BotInterface):
                 if not self._position.is_open:
                     # Use hedge_ratio * capital to determine size, then apply leverage
                     target_value = self._capital * hedge_ratio * leverage
+                    
+                    # Risk Check (v32)
+                    if supervisor:
+                        allowed_val = supervisor.request_allocation(self.bot_id, target_value)
+                        if allowed_val < target_value:
+                            if allowed_val < 1.0:
+                                continue
+                            target_value = allowed_val
+
                     qty = target_value / close
                     fee = target_value * fee_pct
                     
                     # In futures, we don't "spend" the cash, we just lock up margin.
                     # For simplicity in this spot-oriented harness, we track cost_basis.
                     self._position.add_lot(Lot(qty=qty, price=close, fee=fee, ts=ts, row_idx=idx_int))
+                    
+                    # Update Supervisor (v32)
+                    if supervisor:
+                        supervisor.update_bot_status_realtime(self.bot_id, target_value)
                 
             # 3. Logic: Exit SHORT if NOT CRASH and open
             elif self._position.is_open:
                 not_crash_count += 1
                 if not_crash_count >= exit_dwell_bars:
-                    self._close_position(close, fee_pct, ts, f"REGIME_SHIFT_DWELL_{exit_dwell_bars}")
+                    self._close_position(close, fee_pct, ts, f"REGIME_SHIFT_DWELL_{exit_dwell_bars}", supervisor=supervisor)
                     not_crash_count = 0
                 
             # Logging for trace
@@ -132,7 +145,7 @@ class HedgeBot(BotInterface):
         
         return pd.DataFrame(results), stats
 
-    def _close_position(self, price: float, fee_pct: float, ts: Any, reason: str):
+    def _close_position(self, price: float, fee_pct: float, ts: Any, reason: str, supervisor=None):
         if not self._position.is_open:
             return
             
@@ -157,6 +170,10 @@ class HedgeBot(BotInterface):
         })
         self._position.reset()
         self._position.side = "SHORT" # Maintain side for next entry
+        
+        # Update Supervisor (v32)
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, 0.0)
 
 if __name__ == "__main__":
     print("HedgeBot v1 loaded.")

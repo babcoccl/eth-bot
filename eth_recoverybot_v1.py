@@ -93,10 +93,20 @@ class RecoveryBot(BotInterface):
         self._cumulative   = 0.0
         self._last_trade_ts = None
 
-    def _sell_short(self, i, df, fill_price, reason, base_qty, fee_pct):
+    def _sell_short(self, i, df, fill_price, reason, base_qty, fee_pct, supervisor=None):
         row = df.iloc[i]
         # To short, we need margin. We assume 1x leverage, meaning we need cash >= short value.
         sv = base_qty * fill_price
+        
+        # Risk Check (v32)
+        if supervisor:
+            allowed_sv = supervisor.request_allocation(self.bot_id, sv)
+            if allowed_sv < sv:
+                if allowed_sv < 1.0: # Too small
+                    return False
+                base_qty = allowed_sv / fill_price
+                sv = base_qty * fill_price
+
         if sv > self._cash:
             return False
             
@@ -116,9 +126,14 @@ class RecoveryBot(BotInterface):
             "pnl": 0.0, "pnl_after_fees": 0.0, "win": float("nan"),
             "bars_held": float("nan"), "exit_price": float("nan"),
         })
+        
+        # Update Supervisor (v32)
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, sv)
+            
         return True
 
-    def _buy_to_cover(self, i, df, fill_price, reason, fee_pct):
+    def _buy_to_cover(self, i, df, fill_price, reason, fee_pct, supervisor=None):
         p = self._position
         if not p.is_open:
             return False
@@ -155,9 +170,14 @@ class RecoveryBot(BotInterface):
             "bars_held": bh, "exit_price": float("nan"),
         })
         p.reset()
+        
+        # Update Supervisor (v32)
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, 0.0)
+            
         return True
 
-    def run_backtest(self, df: pd.DataFrame, preset: dict, capital: float, preset_name: str) -> tuple:
+    def run_backtest(self, df: pd.DataFrame, preset: dict, capital: float, preset_name: str, supervisor=None) -> tuple:
         self._reset(capital)
         p = preset
         fee_pct      = p["fee_pct"]
@@ -195,15 +215,15 @@ class RecoveryBot(BotInterface):
                 bh = i - self._position.entry_bar
                 
                 if high >= getattr(self, "_active_fib_stop", 999999):
-                    self._buy_to_cover(i, df, getattr(self, "_active_fib_stop", high), "stop_loss_fib", fee_pct)
+                    self._buy_to_cover(i, df, getattr(self, "_active_fib_stop", high), "stop_loss_fib", fee_pct, supervisor=supervisor)
                     continue
                     
                 if low <= getattr(self, "_active_macro_low", 0):
-                    self._buy_to_cover(i, df, getattr(self, "_active_macro_low", low), "target_macro_low", fee_pct)
+                    self._buy_to_cover(i, df, getattr(self, "_active_macro_low", low), "target_macro_low", fee_pct, supervisor=supervisor)
                     continue
                     
                 if bh >= max_hold:
-                    self._buy_to_cover(i, df, close, "time_stop", fee_pct)
+                    self._buy_to_cover(i, df, close, "time_stop", fee_pct, supervisor=supervisor)
                     continue
                     
                 continue
@@ -240,12 +260,12 @@ class RecoveryBot(BotInterface):
                 if close < open_p: # Close red
                     vol_r = float(row.get("vol_ratio", 1.0))
                     if vol_r <= vol_max: # Weak volume
-                        if self._sell_short(i, df, close, "dcb_short", base_qty, fee_pct):
+                        if self._sell_short(i, df, close, "dcb_short", base_qty, fee_pct, supervisor=supervisor):
                             self._active_macro_low = macro_low
                             self._active_fib_stop  = fib_786
 
         if self._position.is_open:
-            self._buy_to_cover(len(df)-1, df, float(df.iloc[-1]["close"]), "end_of_period", fee_pct)
+            self._buy_to_cover(len(df)-1, df, float(df.iloc[-1]["close"]), "end_of_period", fee_pct, supervisor=supervisor)
 
         return self._build_result(capital, preset_name)
 

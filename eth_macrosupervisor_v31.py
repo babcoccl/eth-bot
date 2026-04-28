@@ -119,9 +119,21 @@ class MacroSupervisor:
         self._h1_regime5          = None
         self._regime_transitions  = []
         
+        # Capital Orchestration (v32)
+        self.total_capital        = 10000.0  # Global pool
+        self.bot_weights = {
+            "trendbot":      0.25,  # 25%
+            "rangebot":      0.25,  # 25%
+            "correctionbot": 0.20,  # 20%
+            "recoverybot":   0.15,  # 15%
+            "hedgebot":      0.15,  # 15%
+        }
+        self._deployed_capital = {} # bot_id -> float
+        
         # Advisor / Orchestration State
         self.conviction_score     = 1.0
         self.advisor_notes        = "System default: High Conviction"
+        self._risk_events         = [] # list of (timestamp, bot_id, requested, allowed, reason)
         
         _dir         = os.path.dirname(os.path.abspath(__file__))
         self.db_path = db_path or os.path.join(_dir, "trading_system_v30.db")
@@ -132,6 +144,90 @@ class MacroSupervisor:
         self.advisor_bridge_enabled = True
         self._init_db()
         self._load_advisor_state()
+
+    def request_allocation(self, bot_id: str, requested_amount: float) -> float:
+        """
+        Enforces Budgeting & Throttling.
+        Returns the allowed allocation amount (0.0 to requested_amount).
+        """
+        # Determine strategy type from bot_id (e.g. trendbot_eth_usd -> trendbot)
+        strategy = bot_id.split("_")[0].lower()
+        weight = self.bot_weights.get(strategy, 0.0)
+        
+        # Hard Budget Cap
+        total_budget = self.total_capital * weight
+        current_usage = self._deployed_capital.get(bot_id, 0.0)
+        headroom = max(0.0, total_budget - current_usage)
+        
+        # Conviction Scaling
+        conviction = self.get_capital_scale()
+        adjusted_request = requested_amount * conviction
+        
+        # Final Allowed (Budget limited)
+        allowed = min(adjusted_request, headroom)
+        
+        if allowed < requested_amount:
+            reason = "Budget Cap" if headroom < adjusted_request else "Low Conviction"
+            self._risk_events.append({
+                "ts": datetime.now().isoformat() if hasattr(self, 'now') else "SIM",
+                "bot_id": bot_id,
+                "requested": requested_amount,
+                "allowed": allowed,
+                "reason": reason
+            })
+            
+        return allowed
+
+    def generate_llm_digest(self, bots: list) -> str:
+        """
+        Generates a high-density Markdown report for an LLM Analyst (Jules).
+        Summarizes global state, fleet performance, and risk events.
+        """
+        import json
+        lines = []
+        lines.append("# ETH TRADING SYSTEM: Performance Digest")
+        lines.append(f"**Session ID:** {self._session_id}")
+        lines.append(f"**Current Regime:** {self.current_regime}")
+        lines.append(f"**Conviction Score:** {self.conviction_score}")
+        lines.append(f"**Total Capital Pool:** ${self.total_capital:,.2f}")
+        lines.append("")
+        
+        lines.append("## Fleet Summary")
+        lines.append("| Bot ID | Equity | Realized PnL | Deployed | Status |")
+        lines.append("| :--- | :--- | :--- | :--- | :--- |")
+        for b in bots:
+            s = b.get_state_summary()
+            deployed = self._deployed_capital.get(b.bot_id, 0.0)
+            status = "ACTIVE" if s.get("active_position") else "IDLE"
+            lines.append(f"| {b.bot_id} | ${s['equity']:,.2f} | ${s['realized_pnl']:,.2f} | ${deployed:,.2f} | {status} |")
+        lines.append("")
+        
+        if self._risk_events:
+            lines.append("## Risk & Throttling Events (Recent)")
+            for e in self._risk_events[-10:]:
+                lines.append(f"- **{e['bot_id']}**: Requested ${e['requested']:.2f} -> Allowed ${e['allowed']:.2f} (Reason: {e['reason']})")
+            lines.append("")
+            
+        lines.append("## Recent Tactical History")
+        for b in bots:
+            trades = b.get_recent_trades(3)
+            if trades:
+                lines.append(f"### {b.bot_id}")
+                for t in trades:
+                    side = t.get("side", "N/A")
+                    reason = t.get("reason", "N/A")
+                    pnl = t.get("pnl_after_fees", 0.0)
+                    lines.append(f"- {side} @ {t.get('price', 0.0):.2f} ({reason}) | PnL: ${pnl:.2f}")
+        
+        lines.append("")
+        lines.append("## System Logs & Observations")
+        lines.append(f"- Advisor Notes: {self.advisor_notes}")
+        
+        return "\n".join(lines)
+
+    def update_bot_status_realtime(self, bot_id: str, deployed_amount: float):
+        """Called by bots or orchestrator loop to update the central ledger."""
+        self._deployed_capital[bot_id] = deployed_amount
 
     def _init_db(self) -> None:
         con = sqlite3.connect(self.db_path)

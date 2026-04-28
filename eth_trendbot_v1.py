@@ -333,8 +333,22 @@ class TrendBot(BotInterface):
             supported_regimes  = self.supported_regimes,
         )
 
+    def get_recent_trades(self, n=5) -> list:
+        return self._trades[-n:] if self._trades else []
+
+    def get_state_summary(self) -> dict:
+        return {
+            "bot_id": self.bot_id,
+            "equity": self._cash + self._position.qty * self._position.avg_entry if self._position.is_open else self._cash,
+            "realized_pnl": self._realized_pnl,
+            "active_position": self._position.is_open,
+            "pos_side": self._position.side,
+            "pos_qty": self._position.qty,
+            "pos_entry": self._position.avg_entry,
+        }
+
     def run_backtest(self, df: pd.DataFrame, preset: dict,
-                    capital: float, preset_name: str) -> tuple:
+                    capital: float, preset_name: str, supervisor=None) -> tuple:
         """Run TrendBot strategy over a single approved BULL/RECOVERY window."""
         self._reset(capital)
         p = preset
@@ -421,7 +435,7 @@ class TrendBot(BotInterface):
                         min_progress = p.get("time_stop_min_pct", 0.003)
                         progress = (close - self._position.avg_entry) / self._position.avg_entry
                         if progress < min_progress:
-                            self._sell(i, df, close, "time_stop", sell_fee_pct)
+                            self._sell(i, df, close, "time_stop", sell_fee_pct, supervisor=supervisor)
                             continue
                 # ─────────────────────────────────────────────────────────────
 
@@ -429,12 +443,12 @@ class TrendBot(BotInterface):
                     effective_psl = min(effective_psl, STOP_LOSS_BY_CLASS[bull_cls])
 
                 if unreal < -effective_psl:
-                    self._sell(i, df, close, "pos_stop_loss", sell_fee_pct)
+                    self._sell(i, df, close, "pos_stop_loss", sell_fee_pct, supervisor=supervisor)
                     continue
 
                 pos_target = self._position.target_bps if self._position.target_bps is not None else 180
                 if close >= self._position.avg_entry * (1 + pos_target / 10_000):
-                    self._sell(i, df, close, "target", sell_fee_pct)
+                    self._sell(i, df, close, "target", sell_fee_pct, supervisor=supervisor)
                     continue
 
                 continue
@@ -559,7 +573,7 @@ class TrendBot(BotInterface):
                     resolved_target = p["target_bps"]
 
                 self._buy(i, df, close, "uptrend_pb", effective_qty,
-                          buy_fee_pct, resolved_target, min_profit, sell_fee_pct)
+                          buy_fee_pct, resolved_target, min_profit, sell_fee_pct, supervisor=supervisor)
                 _g["entered"] += 1
             else:
                 # Count which sub-gate(s) blocked (first-failure only)
@@ -572,7 +586,7 @@ class TrendBot(BotInterface):
 
         if self._position.is_open:
             self._sell(len(df) - 1, df, float(df.iloc[-1]["close"]),
-                       "end_of_period", sell_fee_pct)
+                       "end_of_period", sell_fee_pct, supervisor=supervisor)
 
         # -- Print gate diagnostics when no trades were produced --------------
         if _g["entered"] == 0:
@@ -618,9 +632,20 @@ class TrendBot(BotInterface):
         self._last_psl_ts  = None
 
     def _buy(self, i, df, close, reason, qty, buy_fee_pct,
-             target_bps, min_profit, sell_fee_pct):
+             target_bps, min_profit, sell_fee_pct, supervisor=None):
         row = df.iloc[i]
         bv  = qty * close
+        
+        # Risk Check (v32)
+        if supervisor:
+            allowed_bv = supervisor.request_allocation(self.bot_id, bv)
+            if allowed_bv < bv:
+                if allowed_bv < 1.0: # Too small to trade
+                    return
+                # Adjust qty to match allowed budget
+                qty = allowed_bv / close
+                bv  = qty * close
+
         if bv > self._cash:
             return
         round_trip_fee = bv * (buy_fee_pct + sell_fee_pct)
@@ -659,7 +684,7 @@ class TrendBot(BotInterface):
         })
         self.save_to_disk()
 
-    def _sell(self, i, df, close, reason, sell_fee_pct):
+    def _sell(self, i, df, close, reason, sell_fee_pct, supervisor=None):
         p        = self._position
         row      = df.iloc[i]
         sell_val = p.qty * close
@@ -700,6 +725,11 @@ class TrendBot(BotInterface):
             self._realized_pnl += pnl
             self._trade_count  += 1
         p.reset()
+        
+        # Update Supervisor (v32)
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, 0.0)
+            
         self.save_to_disk()
 
     def _build_result(self, capital: float, preset_name: str) -> tuple:
