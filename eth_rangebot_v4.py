@@ -119,6 +119,52 @@ class RangeBot(BotInterface):
             "grid_levels": len(self._buy_levels) + len(self._sell_levels),
         }
 
+    def evaluate_tick(self, tick_price: float, ts: datetime, supervisor=None) -> list:
+        """Live Mode: Check for grid level hits on price ticks."""
+        if not hasattr(self, "_grid_active") or not self._grid_active:
+            return []
+            
+        signals = []
+        # Check Buys
+        for bl in sorted(self._buy_levels, reverse=True):
+            if tick_price <= bl:
+                # Signal a grid buy
+                qty = getattr(self, "_base_qty", 0.05)
+                signals.append({"action": "BUY", "price": bl, "qty": qty, "reason": "grid_buy"})
+                
+        # Check Sells
+        for sl in sorted(self._sell_levels):
+            if tick_price >= sl:
+                qty = getattr(self, "_base_qty", 0.05)
+                signals.append({"action": "SELL", "price": sl, "qty": qty, "reason": "grid_sell"})
+                
+        return signals
+
+    def process_fill(self, fill: Any, supervisor=None) -> None:
+        """Live Mode: Reconcile grid levels after a fill."""
+        if fill.side == "BUY":
+            # 1. Update Levels (Move to Sell Grid)
+            if fill.fill_price in self._buy_levels:
+                self._buy_levels.remove(fill.fill_price)
+                self._sell_levels.append(fill.fill_price + getattr(self, "_grid_step", 10.0))
+            
+            # 2. Update Position
+            self._position.qty += fill.fill_qty
+            self._cash -= (fill.fill_qty * fill.fill_price + fill.fee)
+        else:
+            # 1. Update Levels (Move back to Buy Grid)
+            if fill.fill_price in self._sell_levels:
+                self._sell_levels.remove(fill.fill_price)
+                self._buy_levels.append(fill.fill_price - getattr(self, "_grid_step", 10.0))
+            
+            # 2. Update Position
+            self._position.qty -= fill.fill_qty
+            self._cash += (fill.fill_qty * fill.fill_price - fill.fee)
+            
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, self._position.cost_basis)
+        self.save_to_disk()
+
     def _reset(self, capital: float) -> None:
         self._cash         = float(capital)
         self._capital      = float(capital)

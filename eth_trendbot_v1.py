@@ -347,7 +347,64 @@ class TrendBot(BotInterface):
             "pos_entry": self._position.avg_entry,
         }
 
-    def run_backtest(self, df: pd.DataFrame, preset: dict,
+    def evaluate_tick(self, tick_price: float, ts: datetime, supervisor=None) -> list:
+        """Live Mode: Check for immediate exits (Target/Stop) on price ticks."""
+        if not self._position.is_open:
+            return []
+
+        # Current unrealized PnL based on tick
+        unreal = (tick_price - self._position.avg_entry) / self._position.avg_entry
+
+        # 1. Check Hard Stop Loss (Conservative default if not set)
+        stop_loss_pct = 0.025 # Default 2.5%
+        if unreal < -stop_loss_pct:
+            return [{"action": "SELL", "qty": self._position.qty, "reason": "tick_stop_loss"}]
+
+        # 2. Check Profit Target
+        target_bps = self._position.target_bps if hasattr(self._position, "target_bps") else 180
+        if tick_price >= self._position.avg_entry * (1 + target_bps / 10_000):
+            return [{"action": "SELL", "qty": self._position.qty, "reason": "tick_profit_target"}]
+
+        return []
+
+    def process_fill(self, fill: Any, supervisor=None) -> None:
+        """Live Mode: Update state after exchange confirmation."""
+        if fill.side == "BUY":
+            # Update position
+            self._position.qty += fill.fill_qty
+            self._position.avg_entry = fill.fill_price # Simplified for first fill
+            self._cash -= (fill.fill_qty * fill.fill_price + fill.fee)
+        else:
+            # Update realized PnL
+            sell_val = fill.fill_qty * fill.fill_price
+            pnl = sell_val - fill.fee - (fill.fill_qty * self._position.avg_entry)
+            self._realized_pnl += pnl
+            self._cash += (sell_val - fill.fee)
+            self._position.reset()
+            self._trades.append({
+                "ts": fill.ts.isoformat(), "side": "SELL", "reason": "live_fill",
+                "price": fill.fill_price, "qty": fill.fill_qty, "pnl": pnl
+            })
+        
+        if supervisor:
+            supervisor.update_bot_status_realtime(self.bot_id, self._position.cost_basis)
+        self.save_to_disk()
+
+    def save_to_disk(self):
+        """Persist state for recovery."""
+        os.makedirs(".bot_state", exist_ok=True)
+        state = {
+            "bot_id": self.bot_id,
+            "cash": self._cash,
+            "realized_pnl": self._realized_pnl,
+            "position": {
+                "qty": self._position.qty,
+                "avg_entry": self._position.avg_entry
+            }
+        }
+        with open(f".bot_state/{self.bot_id}.json", "w") as f:
+            import json
+            json.dump(state, f)
                     capital: float, preset_name: str, supervisor=None) -> tuple:
         """Run TrendBot strategy over a single approved BULL/RECOVERY window."""
         self._reset(capital)

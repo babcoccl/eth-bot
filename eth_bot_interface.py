@@ -180,6 +180,21 @@ class BotInterface(ABC):
         """
         ...
 
+    def evaluate_tick(self, tick_price: float, ts: datetime, supervisor=None) -> list:
+        """
+        Optional: React to a real-time price update (tick).
+        Returns a list of Signals (dicts) to be executed by the live engine.
+        Example: [{"action": "BUY", "price": 2500.0, "qty": 0.1, "reason": "signal_name"}]
+        """
+        return []
+
+    def process_fill(self, fill_event: Any, supervisor=None) -> None:
+        """
+        Update internal bot state after an order is successfully filled on the exchange.
+        In live trading, this replaces the immediate state updates used in backtesting.
+        """
+        pass
+
     @abstractmethod
     def run_backtest(
         self,
