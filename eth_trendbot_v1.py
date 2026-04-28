@@ -307,6 +307,7 @@ class TrendBot(BotInterface):
             capital_allocated  = self._capital,
             capital_deployed   = self._position.cost_basis,
             capital_available  = self._cash,
+            open_side          = self._position.side,
             open_qty           = self._position.qty,
             open_avg_entry     = self._position.avg_entry,
             unrealized_pnl     = 0.0,

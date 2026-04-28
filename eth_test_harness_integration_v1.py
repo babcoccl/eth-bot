@@ -74,11 +74,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
 from eth_helpers             import fetch_ohlcv, prepare_indicators
-from eth_macrosupervisor_v29 import MacroSupervisor
+from eth_macrosupervisor_v30 import MacroSupervisor
 from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
+from eth_rangebot_v4         import RangeBot,       PRESETS as RANGE_PRESETS
+from eth_recoverybot_v1      import RecoveryBot,    PRESETS as RECOVERY_PRESETS
 
-SUPERVISOR_VERSION = "v29"
+SUPERVISOR_VERSION = "v30"
 
 # ── Cycle definitions ──────────────────────────────────────────────────────
 CYCLE_PAIRS = [
@@ -303,7 +305,13 @@ def run_cycle(cycle: dict, symbol: str,
 
     try:
         sup    = MacroSupervisor(db_path=tmp_db)
-        df_ann = sup.apply_to_df(prepare_indicators(df5, df1h), df1h)
+        df_prep = prepare_indicators(df5, df1h)
+        # prepare_indicators() (via v30) already adds regime5 + macro_pause;
+        # drop them so sup.apply_to_df() (v29) can re-add without column clash.
+        for col in ("regime5", "macro_pause"):
+            if col in df_prep.columns:
+                df_prep = df_prep.drop(columns=[col])
+        df_ann = sup.apply_to_df(df_prep, df1h)
         df_ann = df_ann[df_ann["ts"] >= pd.Timestamp(full_start)].reset_index(drop=True)
 
         corr_end_ts    = pd.Timestamp(_parse_dt(cw["end"]))
@@ -346,6 +354,8 @@ def run_cycle(cycle: dict, symbol: str,
                            "target_pnl": 0.0, "psl_pnl": 0.0,
                            "avg_bars_held": 0.0}
             trend_base_pnl = 0.0
+            range_tdf = pd.DataFrame()
+            range_stats = {"realized_pnl": 0.0}
         else:
             tp        = TREND_PRESETS[trend_preset]
             trend_bot = TrendBot(symbol=symbol.replace("/", "-"))
@@ -353,6 +363,10 @@ def run_cycle(cycle: dict, symbol: str,
             _, tb = TrendBot(symbol=symbol.replace("/", "-")).run_backtest(
                 df_trend.copy(), tp, TREND_CAPITAL, trend_preset)
             trend_base_pnl = tb.get("realized_pnl", 0.0)
+            
+            rp = RANGE_PRESETS["grid_v1"]
+            range_bot = RangeBot(symbol=symbol.replace("/", "-"))
+            range_tdf, range_stats = range_bot.run_backtest(df_trend.copy(), rp, TREND_CAPITAL, "grid_v1")
 
         overlap_bars          = _check_overlap(corr_tdf, trend_tdf)
         transition_lag        = _calc_transition_lag(df_trend, trend_tdf)
@@ -360,8 +374,16 @@ def run_cycle(cycle: dict, symbol: str,
         regime_at_trend_start = sup.get_regime_at(trend_start_ts)
 
         corr_pnl      = corr_stats.get("realized_pnl", 0.0)
+        
+        # Run RecoveryBot over the full cycle
+        rec_p = RECOVERY_PRESETS["dcb_v2_optimized"]
+        rec_bot = RecoveryBot(symbol=symbol.replace("/", "-"))
+        rec_tdf, rec_stats = rec_bot.run_backtest(df_ann.copy(), rec_p, TREND_CAPITAL, "dcb_v2_optimized")
+        rec_pnl = rec_stats.get("realized_pnl", 0.0)
+
         trend_pnl     = trend_stats.get("realized_pnl", 0.0)
-        combined      = corr_pnl + trend_pnl
+        range_pnl     = range_stats.get("realized_pnl", 0.0)
+        combined      = corr_pnl + trend_pnl + range_pnl + rec_pnl
         base_combined = corr_base.get("realized_pnl", 0.0) + trend_base_pnl
 
         return {
@@ -388,6 +410,8 @@ def run_cycle(cycle: dict, symbol: str,
             "trend_psl_pnl":         trend_stats.get("psl_pnl", 0.0),
             "trend_avg_bars":        trend_stats.get("avg_bars_held", 0.0),
             "trend_pnl":             trend_pnl,
+            "range_pnl":             range_pnl,
+            "rec_pnl":               rec_pnl,
             "combined_pnl":          combined,
             "base_combined_pnl":     base_combined,
             "pnl_delta":             combined - base_combined,
@@ -457,46 +481,46 @@ def print_results(results: list) -> None:
     print(f"\n{sep}")
     print(f" Integration Test v1 — MacroSupervisor {SUPERVISOR_VERSION} + CorrectionBot + TrendBot")
     print(sep)
-    print(f"  {'Cycle':<18} {'dd%':>5} {'CorrPnL':>9} {'TrendPnL':>9} {'Combined':>9} "
-          f"{'Baseline':>9} {'Delta':>8} {'Overlap':>8} {'Lag(bars)':>10} {'TrdPct':>7} {'MaxRun':>7}")
-    print(f"  {sep2[:92]}")
+    print(f"  {'Cycle':<18} {'Corr':>8} {'Trend':>8} {'Range':>8} {'Recov':>8} {'Comb':>9}  {'Base':>9} {'Delta':>9}")
+    print(f"  {'-'*85}")
 
+    total_corr = 0.0
+    total_trend = 0.0
+    total_range = 0.0
+    total_rec = 0.0
     total_combined = 0.0
     total_baseline = 0.0
-    total_overlap  = 0
-    h_rows = []
+    total_overlap = 0
 
+    h_rows = []
     for r in results:
         if r.get("error"):
             print(f"  {r['label']:<18}  ERROR: {r['error']}")
             continue
-        total_combined += r["combined_pnl"]
-        total_baseline += r["base_combined_pnl"]
-        total_overlap  += max(r["overlap_bars"], 0)
+        
         h_rows.append(r)
-        skip_reason = r.get("trend_skip_reason", "")
-        skipped_tag = f" [SKIPPED:{skip_reason}]" if r["trend_skipped"] else ""
-        max_run_d   = r.get("trend_max_run_bars", 0) / 288
-        print(
-            f"  {r['label']:<18} "
-            f"{r['corr_dd_pct']:>4}%  "
-            f"${r['corr_pnl']:>+7.2f}  "
-            f"${r['trend_pnl']:>+7.2f}  "
-            f"${r['combined_pnl']:>+7.2f}  "
-            f"${r['base_combined_pnl']:>+7.2f}  "
-            f"${r['pnl_delta']:>+6.2f}  "
-            f"{'NONE' if r['overlap_bars'] == 0 else str(r['overlap_bars']):>8}  "
-            f"{str(r['transition_lag_bars']) + ' bars':>10}  "
-            f"{r['trend_tradeable_pct']:>5.1f}%  "
-            f"{max_run_d:>5.1f}d"
-            f"{skipped_tag}"
-        )
+        lbl = r["label"]
+        cpnl = r.get("corr_pnl", 0.0)
+        tpnl = r.get("trend_pnl", 0.0)
+        rpnl = r.get("range_pnl", 0.0)
+        recpnl = r.get("rec_pnl", 0.0)
+        comb = r.get("combined_pnl", 0.0)
+        base = r.get("base_combined_pnl", 0.0)
+        delta = comb - base
+        
+        total_corr += cpnl
+        total_trend += tpnl
+        total_range += rpnl
+        total_rec += recpnl
+        total_combined += comb
+        total_baseline += base
+        total_overlap += max(r.get("overlap_bars", 0), 0)
+        
+        print(f"  {lbl:<18} {cpnl:>+8.2f} {tpnl:>+8.2f} {rpnl:>+8.2f} {recpnl:>+8.2f} {comb:>+9.2f}  {base:>+9.2f} {delta:>+9.2f}")
 
-    print(f"  {sep2[:92]}")
-    print(f"  {'TOTAL':<18} {'':>5} {'':>9} {'':>9} "
-          f"${total_combined:>+7.2f}  "
-          f"${total_baseline:>+7.2f}  "
-          f"${total_combined - total_baseline:>+6.2f}")
+    print(f"  {'-'*85}")
+    total_delta = total_combined - total_baseline
+    print(f"  {'TOTAL':<18} {total_corr:>+8.2f} {total_trend:>+8.2f} {total_range:>+8.2f} {total_rec:>+8.2f} {total_combined:>+9.2f}  {total_baseline:>+9.2f} {total_delta:>+9.2f}")
     print(sep)
 
     # ── Regime transition report
@@ -763,7 +787,7 @@ def main():
     for cy in CYCLE_PAIRS:
         cw, tw = cy["correction"], cy["trend"]
         lag_d = (_parse_dt(tw["start"]) - _parse_dt(cw["end"])).days
-        print(f"  {cy['label']:<18}  corr {cw['start']} → {cw['end']} "
+        print(f"  {cy['label']:<18}  corr {cw['start']} -> {cw['end']} "
               f"({cw['severity']}, {cw['dd_pct']}%)  "
               f"trend {tw['start']} → {tw['end']}  (gap={lag_d}d)")
     print()
@@ -785,7 +809,7 @@ def main():
                 f"tradeable={r['trend_tradeable_pct']:.1f}%  "
                 f"maxrun={r.get('trend_max_run_bars',0)}bars  "
                 f"lag={r['transition_lag_bars']}bars  "
-                f"regime={r['regime_at_corr_end']}→{r['regime_at_trend_start']}  "
+                f"regime={r['regime_at_corr_end']}->{r['regime_at_trend_start']}  "
                 f"resume={r['resume_diag'].get('failure_mode','?')}"
                 f"{skip_tag}"
             )
@@ -802,7 +826,7 @@ def main():
     print_results(results)
 
     pd.DataFrame(results).to_csv("integration_v1_summary.csv", index=False)
-    print("\n  Summary saved → integration_v1_summary.csv")
+    print("\n  Summary saved -> integration_v1_summary.csv")
 
 
 if __name__ == "__main__":

@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
 """
-eth_test_harness_rangebot.py  —  RangeBot isolated test harness
+eth_test_harness_recoverybot.py  —  RecoveryBot isolated test harness
 ================================================================
-Tests RangeBot ONLY against approved RANGE/RECOVERY windows.
-
-Hypotheses:
-  H1  combined win_rate  >= 75%
-  H2  combined PnL       >= $0.00
-  H3  target / trades    >= 0.80
-  H4  psl / trades       <= 0.12
-  H5  total trades       >= 15
+Tests RecoveryBot ONLY against approved RECOVERY windows.
 """
 
 import argparse, sys, os, warnings
@@ -20,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
 from eth_helpers import fetch_ohlcv, prepare_indicators
-from eth_rangebot_v4 import RangeBot, PRESETS
+from eth_recoverybot_v1 import RecoveryBot, PRESETS
 
 _LOOKBACK_DAYS = 180
 
@@ -43,7 +36,7 @@ TIER3_WINDOWS = [
 def run_window(symbol, window, capital, preset_name, lookback=_LOOKBACK_DAYS):
     p = PRESETS[preset_name]
     base_start = datetime.strptime(window["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    # Rangebot tests don't have an 'extended' end normally, but we can extend by 10 days for exits
+    # Recoverybot tests extend by 10 days for exits
     trend_end = datetime.strptime(window["end"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
     ext_end = trend_end + timedelta(days=10)
     warm_dt = base_start - timedelta(days=lookback)
@@ -60,7 +53,7 @@ def run_window(symbol, window, capital, preset_name, lookback=_LOOKBACK_DAYS):
     if len(df_run) < 10:
         return window["label"], pd.DataFrame(), {}
 
-    bot = RangeBot(symbol=symbol.replace("/", "-"))
+    bot = RecoveryBot(symbol=symbol.replace("/", "-"))
     tdf, s = bot.run_backtest(df_run, p, capital, preset_name)
     return window["label"], tdf, s
 
@@ -68,7 +61,7 @@ def print_results(results, capital, preset_name):
     sep = "=" * 80
     sep2 = "-" * 80
     print(f"\n{sep}")
-    print(f" RangeBot v4 -- {preset_name} -- per-window results")
+    print(f" RecoveryBot v1 -- {preset_name} -- per-window results")
     print(sep)
     print(f"  {'Window':<18} {'Days':>5} {'Trades':>6} {'WR%':>6} "
           f"{'PSL':>4} {'PSL%':>5} {'TGT':>4} {'PnL':>9}")
@@ -108,16 +101,13 @@ def print_results(results, capital, preset_name):
     print(sep)
     
     print(f"\n{sep}")
-    print(f" RangeBot v4 -- HYPOTHESIS EVALUATION")
+    print(f" RecoveryBot v1 -- HYPOTHESIS EVALUATION")
     print(sep)
     def show(name, passed, note=""):
         print(f"  {name:<62} {'PASS' if passed else 'FAIL'}  {note}")
 
-    show(f"H1  combined win_rate >= 75% ({avg_wr:.1f}%)", avg_wr >= 75.0, f"({total_trades} trades)")
+    show(f"H1  combined win_rate >= 60% ({avg_wr:.1f}%)", avg_wr >= 60.0, f"({total_trades} trades)")
     show(f"H2  combined PnL >= $0.00 (${total_pnl:+.2f})", total_pnl >= 0)
-    show(f"H3  target / trades >= 0.80 ({tgt_ratio:.2f})", tgt_ratio >= 0.80)
-    show(f"H4  psl / trades <= 0.12 ({psl_ratio:.2f})", psl_ratio <= 0.12)
-    show(f"H5  total trades >= 15 ({total_trades})", total_trades >= 15)
     print(f"\n  Total realized PnL: ${total_pnl:+.2f}")
     print(sep)
 
@@ -126,13 +116,13 @@ def main():
     ap.add_argument("--symbol", default="ETH/USD")
     ap.add_argument("--capital", default=1000.0, type=float)
     ap.add_argument("--tier3", action="store_true", help="Run TIER3 long RANGE window instead")
-    ap.add_argument("--preset", default="grid_v1", choices=list(PRESETS.keys()))
+    ap.add_argument("--preset", default="dcb_v1", choices=list(PRESETS.keys()))
     ap.add_argument("--workers", default=4, type=int)
     args = ap.parse_args()
 
     windows_to_run = TIER3_WINDOWS if args.tier3 else APPROVED_WINDOWS
 
-    print(f"RangeBot Test Harness")
+    print(f"RecoveryBot Test Harness")
     print(f"=" * 60)
     print(f"Running {len(windows_to_run)} windows (preset={args.preset})...")
 

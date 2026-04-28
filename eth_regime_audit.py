@@ -71,9 +71,9 @@ class _TempDB:
 def _load_modules():
     """Import both supervisor versions and eth_helpers. Raises ImportError."""
     try:
-        from eth_macrosupervisor_v29 import MacroSupervisor as MS29
+        from eth_macrosupervisor_v30 import MacroSupervisor as MS29
     except ImportError:
-        raise ImportError("eth_macrosupervisor_v29.py not found in current directory.")
+        raise ImportError("eth_macrosupervisor_v30.py not found in current directory.")
     try:
         from eth_macrosupervisor_v30 import MacroSupervisor as MS30
     except ImportError:

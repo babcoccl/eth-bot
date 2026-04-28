@@ -22,7 +22,7 @@ Usage:
 
 Requires:
   eth_helpers.py
-  eth_macrosupervisor_v29.py
+  eth_macrosupervisor_v30.py
   (standard deps: pandas, numpy — same as harness)
 """
 
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
 from eth_helpers             import fetch_ohlcv, prepare_indicators
-from eth_macrosupervisor_v29 import MacroSupervisor
+from eth_macrosupervisor_v30 import MacroSupervisor
 
 
 DEFAULT_START  = "2020-01-01"

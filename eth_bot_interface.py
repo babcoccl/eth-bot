@@ -45,6 +45,7 @@ class Position:
     Read by MacroSupervisor and LLM Orchestrator via BotStatus.
     """
     symbol:        str   = "ETH-USD"
+    side:          str   = "LONG"    # LONG | SHORT
     qty:           float = 0.0
     avg_entry:     float = 0.0
     peak_price:    float = 0.0
@@ -67,12 +68,18 @@ class Position:
         """Mark-to-market PnL net of projected exit fee."""
         if not self.is_open:
             return 0.0
-        sell_value = self.qty * current_price
-        sell_fee   = sell_value * fee_pct
-        return sell_value - sell_fee - self.cost_basis
+        trade_value = self.qty * current_price
+        exit_fee = trade_value * fee_pct
+        if self.side == "LONG":
+            return trade_value - exit_fee - self.cost_basis
+        else:
+            entry_value = sum(l.price * l.qty for l in self.lots)
+            entry_fee = sum(l.fee for l in self.lots)
+            return (entry_value - trade_value) - entry_fee - exit_fee
 
     def reset(self) -> None:
-        """Clear position state after a full sell."""
+        """Clear position state after a full exit."""
+        self.side         = "LONG"
         self.qty          = 0.0
         self.avg_entry    = 0.0
         self.peak_price   = 0.0
@@ -99,6 +106,7 @@ class BotStatus:
     capital_allocated:  float   # total capital authorised by supervisor
     capital_deployed:   float   # currently in open position (cost basis)
     capital_available:  float   # cash available for new entries
+    open_side:          str     # LONG | SHORT
     open_qty:           float   # coin units held
     open_avg_entry:     float
     unrealized_pnl:     float
