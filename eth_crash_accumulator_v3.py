@@ -231,13 +231,17 @@ class CrashAccumulator(BotInterface):
                                       p.get("max_hold_days_moderate", 180)) * 288)
 
         self._support_levels    = _find_support_levels(df_warm, p.get("support_levels", 3))
-        self._crash_start_price = float(df["close"].iloc[0])
+
+        # Optimize loop by using numpy arrays instead of iloc
+        close_arr = df["close"].values
+        ts_arr    = df["ts"].values
+
+        self._crash_start_price = float(close_arr[0])
         self._last_buy_price    = self._crash_start_price
 
         for i in range(len(df)):
-            row   = df.iloc[i]
-            close = float(row["close"])
-            ts    = row["ts"]
+            close = float(close_arr[i])
+            ts    = ts_arr[i]
 
             self._equity_curve.append(
                 self._cash + self._position.qty * close
@@ -271,13 +275,13 @@ class CrashAccumulator(BotInterface):
 
                 # Profit target
                 if close >= self._position.avg_entry * (1 + profit_target):
-                    self._sell(i, df, close, "profit_target", fee_pct)
+                    self._sell(ts, close, "profit_target", fee_pct)
                     self._state = "DONE"
                     continue
 
                 # Time-stop
                 if (i - self._hold_start_bar) > max_hold_bars:
-                    self._sell(i, df, close, "time_stop", fee_pct)
+                    self._sell(ts, close, "time_stop", fee_pct)
                     self._state = "DONE"
                     continue
 
@@ -291,7 +295,7 @@ class CrashAccumulator(BotInterface):
                     if emergency_action == "HOLD" and is_catastrophic:
                         self._state = "FROZEN"
                     else:
-                        self._sell(i, df, close, "emergency_exit", fee_pct)
+                        self._sell(ts, close, "emergency_exit", fee_pct)
                         self._state = "DONE"
                     continue
 
@@ -319,7 +323,7 @@ class CrashAccumulator(BotInterface):
             # vel_scale=0.40 keeps accumulating at 40% clip during capitulation.
             velocity_factor = 1.0
             if i >= vel_bars:
-                price_vel_ago = float(df["close"].iat[i - vel_bars])
+                price_vel_ago = float(close_arr[i - vel_bars])
                 velocity = (close - price_vel_ago) / price_vel_ago
                 if velocity < -vel_halt:
                     self._velocity_paused = True
@@ -379,7 +383,7 @@ class CrashAccumulator(BotInterface):
         return self._build_result(capital, preset_name)
 
 
-    def _sell(self, i, df, close, reason, fee_pct):
+    def _sell(self, ts, close, reason, fee_pct):
         if not self._position.is_open:
             return
         sell_val = self._position.qty * close
@@ -388,7 +392,7 @@ class CrashAccumulator(BotInterface):
         self._cash          += sell_val - fee
         self._realized_pnl  += pnl
         self._trades.append({
-            "ts": df.iloc[i]["ts"], "side": "SELL", "reason": reason,
+            "ts": ts, "side": "SELL", "reason": reason,
             "price": close, "qty": self._position.qty, "fee": fee,
             "spend": 0, "near_support": False, "velocity_paused": False,
             "avg_entry": self._position.avg_entry,
