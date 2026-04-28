@@ -162,10 +162,16 @@ def fetch_ohlcv(symbol, timeframe, since_dt, until_dt, use_cache=True):
                     if not cache_file.exists():  # double-check inside lock
                         df.to_parquet(cache_file, index=False)
             except ImportError:
-                # filelock not installed — fallback to unprotected write
-                # (safe on single-worker runs; install filelock for parallel)
+                # filelock not installed — fallback to atomic rename
+                # (prevents partial writes/corruption, but last writer wins)
                 if not cache_file.exists():
-                    df.to_parquet(cache_file, index=False)
+                    tmp_file = cache_file.with_suffix(".tmp" + str(os.getpid()))
+                    try:
+                        df.to_parquet(tmp_file, index=False)
+                        os.replace(tmp_file, cache_file)
+                    finally:
+                        if tmp_file.exists():
+                            tmp_file.unlink()
         except Exception as e:
             print(f"[CACHE] Warning: could not write cache: {e}", file=sys.stderr)
 
