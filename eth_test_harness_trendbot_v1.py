@@ -70,7 +70,6 @@ r15 harness changes:
 """
 
 import argparse, sys, os, warnings
-from eth_macrosupervisor_v30 import MacroSupervisor
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import pandas as pd
