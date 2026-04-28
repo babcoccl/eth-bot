@@ -89,12 +89,9 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict
 from eth_bull_classifier import (
     _cycle_trough_pct, classify_bull_depth,
-    STOP_LOSS_BY_CLASS, DEEP_THRESHOLD,
-    SHALLOW_RECOV_CUTOFF, MIN_PEAK_BARS,
-    PAUSE_REGIMES, PEAK_REGIMES,
+    STOP_LOSS_BY_CLASS, MIN_PEAK_BARS,
 )
 
-import numpy as np
 import pandas as pd
 
 
