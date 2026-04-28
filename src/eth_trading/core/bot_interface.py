@@ -65,7 +65,21 @@ class Position:
         return sum(l.price * l.qty + l.fee for l in self.lots)
 
     def unrealized_pnl(self, current_price: float, fee_pct: float) -> float:
-        """Mark-to-market PnL net of projected exit fee."""
+        """
+        Mark-to-market PnL net of projected exit fee.
+
+        Parameters
+        ----------
+        current_price : float
+            The current market price of the asset.
+        fee_pct : float
+            The estimated exit fee percentage.
+
+        Returns
+        -------
+        float
+            The unrealized PnL.
+        """
         if not self.is_open:
             return 0.0
         trade_value = self.qty * current_price
@@ -122,22 +136,22 @@ class BotStatus:
 
 class BotInterface(ABC):
     """
-    Contract all tactical bots must implement.
+    Abstract base class defining the contract for all tactical bots.
 
-    MacroSupervisor lifecycle:
-      supervisor.enable(bot, capital)   — bot starts accepting entries
-      supervisor.disable(bot)           — bot stops new entries, holds open pos
-      bot.get_status()                  — called each h1 bar, result to DB
+    Tactical bots implement specific trading strategies and are managed by the
+    MacroSupervisor. They must provide status reports and be capable of
+    running backtests.
 
-    Backtest contract:
-      bot.run_backtest(df, preset, capital, name) → (trades_df, summary_dict)
-      Summary dict keys are defined in ARCHITECTURE.md SUMMARY_KEYS section.
+    Lifecycle
+    ---------
+    1.  `supervisor.enable(bot, capital)`: Bot starts accepting entries.
+    2.  `supervisor.disable(bot)`: Bot stops new entries, holds open positions.
+    3.  `bot.get_status()`: Called each h1 bar, results are persisted.
 
-    Capital / DCA policy:
-      Individual bots do NOT make DCA decisions.
-      max_dca in PRESETS = 1 (one defensive add-on fill only).
-      Additional capital deployment is commanded by the LLM Orchestrator
-      via the capital_allocation table, not coded into bot logic.
+    Backtest Contract
+    -----------------
+    `bot.run_backtest(df, preset, capital, name) -> (trades_df, summary_dict)`
+    The summary dictionary keys should align with project standards.
     """
 
     @property
@@ -174,9 +188,9 @@ class BotInterface(ABC):
     @abstractmethod
     def run_backtest(
         self,
-        df:          pd.DataFrame,
-        preset:      dict,
-        capital:     float,
+        df: pd.DataFrame,
+        preset: dict,
+        capital: float,
         preset_name: str,
     ) -> tuple:
         """
@@ -184,16 +198,21 @@ class BotInterface(ABC):
 
         Parameters
         ----------
-        df          : output of prepare_indicators() joined with
-                      MacroSupervisor.apply_to_df()
-                      Required columns: macro_pause (bool), regime5 (str)
-        preset      : parameter dict from bot's PRESETS
-        capital     : float — starting USDC capital
-        preset_name : str   — label written into trades_df and summary dict
+        df : pd.DataFrame
+            The input data containing price and indicators.
+            Required columns: `macro_pause` (bool), `regime5` (str).
+        preset : dict
+            Parameter dictionary from the bot's PRESETS.
+        capital : float
+            Starting USDC capital for the backtest.
+        preset_name : str
+            Label for the preset, used in results.
 
         Returns
         -------
-        trades_df   : pd.DataFrame  — one row per BUY or SELL event
-        summary     : dict          — SUMMARY_KEYS (see ARCHITECTURE.md)
+        trades_df : pd.DataFrame
+            DataFrame where each row is a BUY or SELL event.
+        summary : dict
+            Dictionary containing backtest performance metrics.
         """
         ...

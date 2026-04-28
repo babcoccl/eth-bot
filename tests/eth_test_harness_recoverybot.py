@@ -12,8 +12,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
-from eth_helpers import fetch_ohlcv, prepare_indicators
-from eth_recoverybot_v1 import RecoveryBot, PRESETS
+from eth_trading.utils.helpers import fetch_ohlcv, prepare_indicators
+from eth_trading.bots.recovery_bot import RecoveryBot, PRESETS
 
 _LOOKBACK_DAYS = 180
 

@@ -51,7 +51,7 @@ from __future__ import annotations
 import argparse, json, os, sqlite3, sys, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-from eth_bull_classifier import _cycle_trough_pct, classify_bull_depth
+from eth_trading.core.bull_classifier import _cycle_trough_pct, classify_bull_depth
 import numpy as np
 import pandas as pd
 
@@ -186,20 +186,14 @@ class MacroSupervisor:
         con.commit()
         con.close()
 
-    def _calc_rsi(self, close: pd.Series) -> pd.Series:
-        delta = close.diff()
-        gain  = delta.clip(lower=0).ewm(alpha=1/self.rsi_period, adjust=False).mean()
-        loss  = (-delta.clip(upper=0)).ewm(alpha=1/self.rsi_period, adjust=False).mean()
-        rs    = gain / loss.replace(0, np.nan)
-        return 100 - (100 / (1 + rs))
-
     def _compute_h1_signals(self, df1h: pd.DataFrame) -> pd.DataFrame:
+        from eth_trading.utils.helpers import calc_rsi
         h = df1h.copy().sort_values("ts").reset_index(drop=True)
         h["fast_ema"]       = h["close"].ewm(span=self.ema_fast, adjust=False).mean()
         h["slow_ema"]       = h["close"].ewm(span=self.ema_slow, adjust=False).mean()
         h["trend_strength"] = ((h["fast_ema"] - h["slow_ema"])
                                / h["slow_ema"].replace(0, np.nan))
-        h["rsi"]            = self._calc_rsi(h["close"])
+        h["rsi"]            = calc_rsi(h["close"], self.rsi_period)
         h["rolling_peak"]   = h["close"].rolling(self.peak_window, min_periods=1).max()
         h["drawdown"]       = (h["close"] - h["rolling_peak"]) / h["rolling_peak"]
         h["pct_chg_24h"]    = h["close"].pct_change(24)
@@ -596,9 +590,9 @@ def main():
                     help="Override regime5_min_dwell_bars (0 = disable debounce)")
     args = ap.parse_args()
     try:
-        from eth_helpers import fetch_ohlcv
+        from eth_trading.utils.helpers import fetch_ohlcv
     except ImportError:
-        print("[ERROR] eth_helpers.py must be in the same directory.")
+        print("[ERROR] eth_trading package must be in the PYTHONPATH.")
         sys.exit(1)
     start_dt = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_s    = args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d")

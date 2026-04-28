@@ -69,19 +69,13 @@ class _TempDB:
 # ---------------------------------------------------------------------------
 
 def _load_modules():
-    """Import both supervisor versions and eth_helpers. Raises ImportError."""
+    """Import supervisor and helper modules. Raises ImportError if not found."""
     try:
-        from eth_macrosupervisor_v30 import MacroSupervisor as MS29
-    except ImportError:
-        raise ImportError("eth_macrosupervisor_v30.py not found in current directory.")
-    try:
-        from eth_macrosupervisor_v30 import MacroSupervisor as MS30
-    except ImportError:
-        raise ImportError("eth_macrosupervisor_v30.py not found in current directory.")
-    try:
-        from eth_helpers import fetch_ohlcv
-    except ImportError:
-        raise ImportError("eth_helpers.py not found in current directory.")
+        from eth_trading.supervisor.macro_supervisor import MacroSupervisor as MS29
+        from eth_trading.supervisor.macro_supervisor import MacroSupervisor as MS30
+        from eth_trading.utils.helpers import fetch_ohlcv
+    except ImportError as e:
+        raise ImportError(f"Failed to import eth_trading components: {e}")
     return MS29, MS30, fetch_ohlcv
 
 
@@ -311,11 +305,12 @@ def main():
 
     # Recompute enriched h1 signals (drawdown, rsi) for the diff table.
     # Uses v30 params -- identical to v29 for these columns.
+    from eth_trading.utils.helpers import calc_rsi
     print("Building reference h1 signals ...")
     h_ref = df1h.copy().sort_values("ts").reset_index(drop=True)
     h_ref["fast_ema"]     = h_ref["close"].ewm(span=sup30.ema_fast,  adjust=False).mean()
     h_ref["slow_ema"]     = h_ref["close"].ewm(span=sup30.ema_slow,  adjust=False).mean()
-    h_ref["rsi"]          = sup30._calc_rsi(h_ref["close"])
+    h_ref["rsi"]          = calc_rsi(h_ref["close"], sup30.rsi_period)
     h_ref["rolling_peak"] = h_ref["close"].rolling(sup30.peak_window, min_periods=1).max()
     h_ref["drawdown"]     = (h_ref["close"] - h_ref["rolling_peak"]) / h_ref["rolling_peak"]
 

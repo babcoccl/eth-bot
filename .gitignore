@@ -14,3 +14,7 @@ ohlcv_cache/*
 __pycache__/*
 *.db
 *.csv
+ohlcv_cache/
+__pycache__/
+*.log
+*.db

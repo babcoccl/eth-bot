@@ -39,8 +39,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
-from eth_helpers import fetch_ohlcv, prepare_indicators
-from eth_correction_bot_v1 import CorrectionBot, PRESETS
+from eth_trading.utils.helpers import fetch_ohlcv, prepare_indicators
+from eth_trading.bots.correction_bot import CorrectionBot, PRESETS
 from correction_windows_4yr import CORRECTION_WINDOWS
 
 # Minimum discount to include in H1/H2 evaluation scope.
@@ -194,7 +194,7 @@ def main():
     args = ap.parse_args()
 
     if args.no_cache:
-        from eth_helpers import clear_ohlcv_cache
+        from eth_trading.utils.helpers import clear_ohlcv_cache
         clear_ohlcv_cache()
 
     print(f"CorrectionBot v1 Tests")

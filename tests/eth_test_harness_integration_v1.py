@@ -73,12 +73,12 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
-from eth_helpers             import fetch_ohlcv, prepare_indicators
-from eth_macrosupervisor_v30 import MacroSupervisor
-from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
-from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
-from eth_rangebot_v4         import RangeBot,       PRESETS as RANGE_PRESETS
-from eth_recoverybot_v1      import RecoveryBot,    PRESETS as RECOVERY_PRESETS
+from eth_trading.utils.helpers import fetch_ohlcv, prepare_indicators
+from eth_trading.supervisor.macro_supervisor import MacroSupervisor
+from eth_trading.bots.correction_bot import CorrectionBot, PRESETS as CORRECTION_PRESETS
+from eth_trading.bots.trend_bot import TrendBot,       PRESETS as TREND_PRESETS
+from eth_trading.bots.range_bot import RangeBot,       PRESETS as RANGE_PRESETS
+from eth_trading.bots.recovery_bot import RecoveryBot,    PRESETS as RECOVERY_PRESETS
 
 SUPERVISOR_VERSION = "v30"
 
@@ -769,7 +769,7 @@ def main():
     args = ap.parse_args()
 
     if args.no_cache:
-        from eth_helpers import clear_ohlcv_cache
+        from eth_trading.utils.helpers import clear_ohlcv_cache
         clear_ohlcv_cache()
 
     print(f"Integration Test v1 — MacroSupervisor {SUPERVISOR_VERSION} + CorrectionBot + TrendBot")

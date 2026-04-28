@@ -89,7 +89,8 @@ def classify_bull_depth(cycle_trough_pct: float) -> str:
 
     Returns
     -------
-    str : one of DEEP | SHALLOW_RECOV_DEEP | SHALLOW_RECOV_LIGHT | SHALLOW_CONT
+    str
+        One of DEEP, SHALLOW_RECOV_DEEP, SHALLOW_RECOV_LIGHT, or SHALLOW_CONT.
     """
     dd = cycle_trough_pct / 100.0  # convert to fraction
 
@@ -117,25 +118,34 @@ def _cycle_trough_pct(
     debug: bool = False,
 ) -> tuple[float, int, int]:
     """
-    Walk backwards from entry_idx to find the last qualifying BULL/RANGE
-    peak block (>= min_peak_bars bars), take its max close as the reference
-    price, then find the minimum close between that block and entry_idx.
+    Walk backwards to find the last qualifying peak and calculate the trough.
+
+    Finds the last qualifying BULL/RANGE peak block (>= min_peak_bars bars),
+    takes its max close as the reference price, then finds the minimum close
+    between that block and entry_idx.
 
     Parameters
     ----------
-    regime_arr  : array-like of str regime labels (aligned with close_arr)
-    close_arr   : array-like of float close prices
-    entry_idx   : int  — bar index of the BULL entry (first bar of new BULL segment)
-    min_peak_bars : int — minimum contiguous BULL/RANGE bars to qualify as a real peak
-    debug       : bool — print trough block details
+    regime_arr : array-like
+        Array-like of str regime labels (aligned with close_arr).
+    close_arr : array-like
+        Array-like of float close prices.
+    entry_idx : int
+        Bar index of the BULL entry (first bar of new BULL segment).
+    min_peak_bars : int, default MIN_PEAK_BARS
+        Minimum contiguous BULL/RANGE bars to qualify as a real peak.
+    debug : bool, default False
+        If True, prints trough block details.
 
     Returns
     -------
-    (trough_pct, ref_bar_idx, trough_block_start)
-      trough_pct        : float — percentage drop from ref_price to trough_price
-                          0.0 if no qualifying block found (SHALLOW_CONT)
-      ref_bar_idx       : int   — bar of max close within the peak block (-1 if none)
-      trough_block_start: int   — start bar of the qualifying peak block (-1 if none)
+    trough_pct : float
+        Percentage drop from ref_price to trough_price.
+        0.0 if no qualifying block found (SHALLOW_CONT).
+    ref_bar_idx : int
+        Bar of max close within the peak block (-1 if none).
+    trough_block_start : int
+        Start bar of the qualifying peak block (-1 if none).
     """
     n = entry_idx
 

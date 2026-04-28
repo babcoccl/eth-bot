@@ -29,8 +29,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from eth_macrosupervisor_v30 import MacroSupervisor
-from eth_bull_classifier import (
+from eth_trading.supervisor.macro_supervisor import MacroSupervisor
+from eth_trading.core.bull_classifier import (
     _cycle_trough_pct,
     classify_bull_depth,
     MIN_PEAK_BARS,

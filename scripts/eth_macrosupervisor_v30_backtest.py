@@ -87,7 +87,7 @@ from __future__ import annotations
 import argparse, os, sys, tempfile
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict
-from eth_bull_classifier import (
+from eth_trading.core.bull_classifier import (
     _cycle_trough_pct, classify_bull_depth,
     STOP_LOSS_BY_CLASS, DEEP_THRESHOLD,
     SHALLOW_RECOV_CUTOFF, MIN_PEAK_BARS,
@@ -372,8 +372,8 @@ def main():
     args = ap.parse_args()
 
     try:
-        from eth_macrosupervisor_v30 import MacroSupervisor
-        from eth_helpers import fetch_ohlcv
+        from eth_trading.supervisor.macro_supervisor import MacroSupervisor
+        from eth_trading.utils.helpers import fetch_ohlcv
     except ImportError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)

@@ -38,8 +38,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
-from eth_helpers             import fetch_ohlcv, prepare_indicators
-from eth_macrosupervisor_v30 import MacroSupervisor
+from eth_trading.utils.helpers import fetch_ohlcv, prepare_indicators
+from eth_trading.supervisor.macro_supervisor import MacroSupervisor
 
 
 DEFAULT_START  = "2020-01-01"
@@ -72,7 +72,7 @@ def main():
     args = ap.parse_args()
 
     if args.no_cache:
-        from eth_helpers import clear_ohlcv_cache
+        from eth_trading.utils.helpers import clear_ohlcv_cache
         clear_ohlcv_cache()
         print("[cache cleared]")
 

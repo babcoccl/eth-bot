@@ -70,15 +70,15 @@ r15 harness changes:
 """
 
 import argparse, sys, os, warnings
-from eth_macrosupervisor_v30 import MacroSupervisor
+from eth_trading.supervisor.macro_supervisor import MacroSupervisor
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
-from eth_helpers import fetch_ohlcv, prepare_indicators
-from eth_trendbot_v1 import TrendBot, PRESETS
+from eth_trading.utils.helpers import fetch_ohlcv, prepare_indicators
+from eth_trading.bots.trend_bot import TrendBot, PRESETS
 from trend_windows_generated import TREND_WINDOWS
 
 MAX_DATE_SHIFTS = 3
@@ -402,7 +402,7 @@ def main():
     args = ap.parse_args()
 
     if args.no_cache:
-        from eth_helpers import clear_ohlcv_cache
+        from eth_trading.utils.helpers import clear_ohlcv_cache
         clear_ohlcv_cache()
 
     print(f"TrendBot v1 Tests")

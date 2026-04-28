@@ -37,8 +37,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings("ignore")
 
-from eth_helpers import fetch_ohlcv, prepare_indicators
-from eth_crash_accumulator_v3 import CrashAccumulator, PRESETS
+from eth_trading.utils.helpers import fetch_ohlcv, prepare_indicators
+from eth_trading.bots.crash_accumulator import CrashAccumulator, PRESETS
 from crash_windows_4yr import CRASH_WINDOWS
 
 # Targeted crash scope constants.
@@ -214,7 +214,7 @@ def main():
     args = ap.parse_args()
 
     if args.no_cache:
-        from eth_helpers import clear_ohlcv_cache
+        from eth_trading.utils.helpers import clear_ohlcv_cache
         clear_ohlcv_cache()
 
     print(f"Running {len(CRASH_WINDOWS)} CRASH windows (max hold {args.max_hold_days}d, "

@@ -36,7 +36,7 @@ import pandas as pd
 import numpy as np
 
 # All classification logic is authoritative in eth_bull_classifier.py
-from eth_bull_classifier import (
+from eth_trading.core.bull_classifier import (
     classify_bull_depth,
     _cycle_trough_pct,
     STOP_LOSS_BY_CLASS,
