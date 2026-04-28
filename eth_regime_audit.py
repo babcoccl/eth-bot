@@ -33,7 +33,7 @@ Note: SQLite db files are written to temp files and deleted after the run.
 from __future__ import annotations
 import argparse, os, sys, tempfile
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import pandas as pd
