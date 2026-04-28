@@ -1,0 +1,30 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-04-28T00:09:00Z",
+  "bot_versions": {
+    "MacroSupervisor": "v30",
+    "TrendBot": "v1",
+    "RangeBot": "v4_grid",
+    "RecoveryBot": "v1_dcb",
+    "CorrectionBot": "v1"
+  },
+  "baseline_total_pnl": 137.30,
+  "cycles": {
+    "CyA May-Jun22": {
+      "combined_pnl": 84.13,
+      "base_pnl": -12.79
+    },
+    "CyB Feb-Mar23": {
+      "combined_pnl": 14.47,
+      "base_pnl": 3.71
+    },
+    "CyC Apr-May24": {
+      "combined_pnl": -24.02,
+      "base_pnl": 1.74
+    },
+    "CyD Feb-Mar25": {
+      "combined_pnl": 62.72,
+      "base_pnl": 0.32
+    }
+  }
+}
