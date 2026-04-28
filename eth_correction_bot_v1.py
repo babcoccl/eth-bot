@@ -111,9 +111,13 @@ def _find_support_levels(df_warm: pd.DataFrame, n_levels: int = 3) -> List[float
         buckets    = 20
         bucket_sz  = (hi - lo) / buckets
         vol_profile = {}
-        for _, row in df_warm.iterrows():
-            mid    = (row["high"] + row["low"]) / 2
-            vol    = row.get("volume", 1.0)
+        highs   = df_warm["high"].values
+        lows    = df_warm["low"].values
+        volumes = df_warm["volume"].values if "volume" in df_warm.columns else None
+
+        for i in range(len(df_warm)):
+            mid    = (highs[i] + lows[i]) / 2
+            vol    = volumes[i] if volumes is not None else 1.0
             bucket = int((mid - lo) / bucket_sz)
             bucket = max(0, min(buckets - 1, bucket))
             node   = lo + (bucket + 0.5) * bucket_sz
@@ -206,14 +210,21 @@ class CorrectionBot(BotInterface):
         max_hold_bars = int(p.get("max_hold_days", 90) * 288)
 
         self._support_levels         = _find_support_levels(df_warm, p.get("support_levels", 3))
-        self._correction_start_price = float(df["close"].iloc[0])
+
+        closes  = df["close"].values
+        tss     = df["ts"].values
+        regimes = df["regime5"].values if "regime5" in df.columns else ["RANGE"] * len(df)
+
+        if correction_end_ts is not None:
+            correction_end_ts = np.datetime64(pd.Timestamp(correction_end_ts).to_datetime64())
+
+        self._correction_start_price = float(closes[0])
         self._last_buy_price         = self._correction_start_price
 
         for i in range(len(df)):
-            row   = df.iloc[i]
-            close = float(row["close"])
-            ts    = row["ts"]
-            regime = str(row.get("regime5", "RANGE"))
+            close  = float(closes[i])
+            ts     = tss[i]
+            regime = str(regimes[i])
 
             self._equity_curve.append(
                 self._cash + self._position.qty * close
@@ -228,19 +239,19 @@ class CorrectionBot(BotInterface):
 
                 # Profit target
                 if dd >= profit_target:
-                    self._sell(i, df, close, "profit_target", fee_pct)
+                    self._sell(ts, close, "profit_target", fee_pct)
                     self._state = "DONE"
                     continue
 
                 # Hard stop-loss — correction has become a crash; hand off to CrashAccumulator
                 if dd <= -stop_loss:
-                    self._sell(i, df, close, "stop_loss", fee_pct)
+                    self._sell(ts, close, "stop_loss", fee_pct)
                     self._state = "STOPPED"
                     continue
 
                 # Time-stop
                 if (i - self._hold_start_bar) > max_hold_bars:
-                    self._sell(i, df, close, "time_stop", fee_pct)
+                    self._sell(ts, close, "time_stop", fee_pct)
                     self._state = "DONE"
                     continue
 
@@ -262,7 +273,7 @@ class CorrectionBot(BotInterface):
             # ── VELOCITY FILTER (soft-scale) ──────────────────────────────────
             velocity_factor = 1.0
             if i >= vel_bars:
-                price_vel_ago = float(df["close"].iat[i - vel_bars])
+                price_vel_ago = float(closes[i - vel_bars])
                 velocity = (close - price_vel_ago) / price_vel_ago
                 if velocity < -vel_halt:
                     self._velocity_paused = True
@@ -322,7 +333,7 @@ class CorrectionBot(BotInterface):
 
         return self._build_result(capital, preset_name)
 
-    def _sell(self, i, df, close, reason, fee_pct):
+    def _sell(self, ts, close, reason, fee_pct):
         if not self._position.is_open:
             return
         sell_val = self._position.qty * close
@@ -331,7 +342,7 @@ class CorrectionBot(BotInterface):
         self._cash         += sell_val - fee
         self._realized_pnl += pnl
         self._trades.append({
-            "ts": df.iloc[i]["ts"], "side": "SELL", "reason": reason,
+            "ts": ts, "side": "SELL", "reason": reason,
             "price": close, "qty": self._position.qty, "fee": fee,
             "spend": 0, "near_support": False, "velocity_paused": False,
             "avg_entry": self._position.avg_entry,
