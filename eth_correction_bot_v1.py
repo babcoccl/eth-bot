@@ -213,6 +213,7 @@ class CorrectionBot(BotInterface):
             row   = df.iloc[i]
             close = float(row["close"])
             ts    = row["ts"]
+            regime = str(row.get("regime5", "RANGE"))
 
             self._equity_curve.append(
                 self._cash + self._position.qty * close
@@ -242,6 +243,10 @@ class CorrectionBot(BotInterface):
                     self._sell(i, df, close, "time_stop", fee_pct)
                     self._state = "DONE"
                     continue
+
+            # ── REGIME GATE ───────────────────────────────────────────────────
+            if regime not in self.supported_regimes:
+                continue
 
             # ── SKIP ACCUMULATION ─────────────────────────────────────────────
             if self._state in ("DONE", "STOPPED"):

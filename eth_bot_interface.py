@@ -59,6 +59,15 @@ class Position:
     def is_open(self) -> bool:
         return self.qty > 1e-9
 
+    def add_lot(self, lot: Lot) -> None:
+        """Add a fill lot and update aggregate position metrics."""
+        self.lots.append(lot)
+        total_qty = sum(l.qty for l in self.lots)
+        if total_qty > 0:
+            total_cost = sum(l.price * l.qty for l in self.lots)
+            self.avg_entry = total_cost / total_qty
+        self.qty = total_qty
+
     @property
     def cost_basis(self) -> float:
         """Total capital at risk including all fill fees."""

@@ -79,6 +79,7 @@ from eth_correction_bot_v1   import CorrectionBot, PRESETS as CORRECTION_PRESETS
 from eth_trendbot_v1         import TrendBot,       PRESETS as TREND_PRESETS
 from eth_rangebot_v4         import RangeBot,       PRESETS as RANGE_PRESETS
 from eth_recoverybot_v1      import RecoveryBot,    PRESETS as RECOVERY_PRESETS
+from eth_hedgebot_v1         import HedgeBot,       PRESETS as HEDGE_PRESETS
 
 SUPERVISOR_VERSION = "v30"
 
@@ -381,9 +382,15 @@ def run_cycle(cycle: dict, symbol: str,
         rec_tdf, rec_stats = rec_bot.run_backtest(df_ann.copy(), rec_p, TREND_CAPITAL, "dcb_v2_optimized")
         rec_pnl = rec_stats.get("realized_pnl", 0.0)
 
+        # Run HedgeBot over the full cycle
+        hp = HEDGE_PRESETS["hedge_v2_optimized"]
+        hedge_bot = HedgeBot(symbol=symbol.replace("/", "-"))
+        hedge_tdf, hedge_stats = hedge_bot.run_backtest(df_ann.copy(), hp, TREND_CAPITAL, "hedge_v2_optimized")
+        hedge_pnl = hedge_stats.get("realized_pnl", 0.0)
+
         trend_pnl     = trend_stats.get("realized_pnl", 0.0)
         range_pnl     = range_stats.get("realized_pnl", 0.0)
-        combined      = corr_pnl + trend_pnl + range_pnl + rec_pnl
+        combined      = corr_pnl + trend_pnl + range_pnl + rec_pnl + hedge_pnl
         base_combined = corr_base.get("realized_pnl", 0.0) + trend_base_pnl
 
         return {
@@ -412,6 +419,7 @@ def run_cycle(cycle: dict, symbol: str,
             "trend_pnl":             trend_pnl,
             "range_pnl":             range_pnl,
             "rec_pnl":               rec_pnl,
+            "hedge_pnl":             hedge_pnl,
             "combined_pnl":          combined,
             "base_combined_pnl":     base_combined,
             "pnl_delta":             combined - base_combined,
@@ -481,13 +489,14 @@ def print_results(results: list) -> None:
     print(f"\n{sep}")
     print(f" Integration Test v1 — MacroSupervisor {SUPERVISOR_VERSION} + CorrectionBot + TrendBot")
     print(sep)
-    print(f"  {'Cycle':<18} {'Corr':>8} {'Trend':>8} {'Range':>8} {'Recov':>8} {'Comb':>9}  {'Base':>9} {'Delta':>9}")
-    print(f"  {'-'*85}")
+    print(f"  {'Cycle':<18} {'Corr':>8} {'Trend':>8} {'Range':>8} {'Recov':>8} {'Hedge':>8} {'Comb':>9}  {'Base':>9} {'Delta':>9}")
+    print(f"  {'-'*95}")
 
     total_corr = 0.0
     total_trend = 0.0
     total_range = 0.0
     total_rec = 0.0
+    total_hedge = 0.0
     total_combined = 0.0
     total_baseline = 0.0
     total_overlap = 0
@@ -504,6 +513,7 @@ def print_results(results: list) -> None:
         tpnl = r.get("trend_pnl", 0.0)
         rpnl = r.get("range_pnl", 0.0)
         recpnl = r.get("rec_pnl", 0.0)
+        hpnl = r.get("hedge_pnl", 0.0)
         comb = r.get("combined_pnl", 0.0)
         base = r.get("base_combined_pnl", 0.0)
         delta = comb - base
@@ -512,15 +522,16 @@ def print_results(results: list) -> None:
         total_trend += tpnl
         total_range += rpnl
         total_rec += recpnl
+        total_hedge += hpnl
         total_combined += comb
         total_baseline += base
         total_overlap += max(r.get("overlap_bars", 0), 0)
         
-        print(f"  {lbl:<18} {cpnl:>+8.2f} {tpnl:>+8.2f} {rpnl:>+8.2f} {recpnl:>+8.2f} {comb:>+9.2f}  {base:>+9.2f} {delta:>+9.2f}")
+        print(f"  {lbl:<18} {cpnl:>+8.2f} {tpnl:>+8.2f} {rpnl:>+8.2f} {recpnl:>+8.2f} {hpnl:>+8.2f} {comb:>+9.2f}  {base:>+9.2f} {delta:>+9.2f}")
 
-    print(f"  {'-'*85}")
+    print(f"  {'-'*95}")
     total_delta = total_combined - total_baseline
-    print(f"  {'TOTAL':<18} {total_corr:>+8.2f} {total_trend:>+8.2f} {total_range:>+8.2f} {total_rec:>+8.2f} {total_combined:>+9.2f}  {total_baseline:>+9.2f} {total_delta:>+9.2f}")
+    print(f"  {'TOTAL':<18} {total_corr:>+8.2f} {total_trend:>+8.2f} {total_range:>+8.2f} {total_rec:>+8.2f} {total_hedge:>+8.2f} {total_combined:>+9.2f}  {total_baseline:>+9.2f} {total_delta:>+9.2f}")
     print(sep)
 
     # ── Regime transition report

@@ -182,7 +182,7 @@ class RecoveryBot(BotInterface):
         for i in range(len(df)):
             row    = df.iloc[i]
             ts     = row["ts"]
-            regime = str(row.get("regime_h1", "RANGE"))
+            regime = str(row.get("regime5", "RANGE"))
             low    = float(row["low"])
             high   = float(row["high"])
             close  = float(row["close"])

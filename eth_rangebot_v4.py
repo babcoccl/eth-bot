@@ -3,6 +3,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from eth_bot_interface import BotInterface, BotStatus, Position, Lot
+from eth_persistence_v1 import BotStateStore
 
 warnings.filterwarnings("ignore")
 
@@ -12,6 +13,7 @@ PRESETS = {
         "grid_levels":        10,
         "grid_step_bps":      40,       # 0.4% spacing
         "pos_stop_loss_pct":  0.06,     # 6% catastrophic stop
+        "drift_threshold":    0.0015,   # Pause grid if trend_strength > 0.15%
         "fee_pct":            0.00065,
     },
     "grid_v1_tight": {
@@ -49,6 +51,36 @@ class RangeBot(BotInterface):
         self._equity_curve = []
         self._trades       = []
         self._cumulative   = 0.0
+        self._store = BotStateStore(self.bot_id)
+
+    def save_to_disk(self):
+        extra = {
+            "grid_active": self._grid_active,
+            "base_price":  self._base_price,
+            "grid_step":   self._grid_step,
+            "buy_levels":  self._buy_levels,
+            "sell_levels": self._sell_levels
+        }
+        self._store.save(self._cash, self._capital, self._position, self._trades, extra_state=extra)
+
+    def load_from_disk(self):
+        state = self._store.load()
+        if state:
+            self._cash = state["cash"]
+            self._capital = state["capital"]
+            self._position = state["position"]
+            self._trades = state.get("trades", [])
+            
+            extra = state.get("extra_state", {})
+            self._grid_active = extra.get("grid_active", False)
+            self._base_price  = extra.get("base_price", 0.0)
+            self._grid_step   = extra.get("grid_step", 0.0)
+            self._buy_levels  = extra.get("buy_levels", [])
+            self._sell_levels = extra.get("sell_levels", [])
+            
+            print(f"[INFO] {self.bot_id} re-hydrated state from disk.")
+            return True
+        return False
 
     @property
     def bot_id(self) -> str:
@@ -98,7 +130,7 @@ class RangeBot(BotInterface):
         for i in range(len(df)):
             row    = df.iloc[i]
             ts     = row["ts"]
-            regime = str(row.get("regime_h1", "RANGE"))
+            regime = str(row.get("regime5", "RANGE"))
             low    = float(row["low"])
             high   = float(row["high"])
             close  = float(row["close"])
@@ -124,6 +156,21 @@ class RangeBot(BotInterface):
                     self._buy_levels = []
                     self._sell_levels = []
                 continue
+
+            # ── DRIFT FILTER ──────────────────────────────────────────────────
+            # Even in RANGE regime, if trend_strength is too high, it indicates
+            # a persistent drift that can blow out a grid.
+            drift_thresh = p.get("drift_threshold", 0.0015)
+            trend_str    = float(row.get("trend_strength", 0.0))
+            if abs(trend_str) > drift_thresh:
+                if self._grid_active:
+                    if self._position.is_open:
+                        self._sell_all(i, df, close, "drift_exit", fee_pct)
+                    self._grid_active = False
+                    self._buy_levels = []
+                    self._sell_levels = []
+                continue
+            # ──────────────────────────────────────────────────────────────────
 
             # Initialize or re-anchor grid
             if not self._grid_active:
@@ -182,9 +229,9 @@ class RangeBot(BotInterface):
             "rsi": float(row.get("rsi", float("nan"))),
             "bb_lower": float(row.get("bb_lower", float("nan"))),
             "bw_pct":   float(row.get("bw_pct",   float("nan"))),
-            "pnl": 0.0, "pnl_after_fees": 0.0, "win": float("nan"),
             "bars_held": float("nan"), "exit_price": float("nan"),
         })
+        self.save_to_disk()
         return True
 
     def _sell_lot(self, i, df, fill_price, reason, fee_pct) -> bool:

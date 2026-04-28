@@ -205,6 +205,7 @@ import pandas as pd
 
 from eth_bot_interface import BotInterface, BotStatus, Position, Lot
 from eth_bull_classifier import STOP_LOSS_BY_CLASS
+from eth_persistence_v1 import BotStateStore
 
 warnings.filterwarnings("ignore")
 
@@ -291,6 +292,21 @@ class TrendBot(BotInterface):
         self._trades       = []
         self._equity_curve = []
         self._cumulative   = 0.0
+        self._store = BotStateStore(self.bot_id)
+
+    def save_to_disk(self):
+        self._store.save(self._cash, self._capital, self._position, self._trades)
+
+    def load_from_disk(self):
+        state = self._store.load()
+        if state:
+            self._cash = state["cash"]
+            self._capital = state["capital"]
+            self._position = state["position"]
+            self._trades = state.get("trades", [])
+            print(f"[INFO] {self.bot_id} re-hydrated state from disk.")
+            return True
+        return False
 
     @property
     def bot_id(self) -> str:
@@ -641,6 +657,7 @@ class TrendBot(BotInterface):
             "win": float("nan"), "bars_held": float("nan"),
             "exit_price": float("nan"),
         })
+        self.save_to_disk()
 
     def _sell(self, i, df, close, reason, sell_fee_pct):
         p        = self._position
@@ -683,6 +700,7 @@ class TrendBot(BotInterface):
             self._realized_pnl += pnl
             self._trade_count  += 1
         p.reset()
+        self.save_to_disk()
 
     def _build_result(self, capital: float, preset_name: str) -> tuple:
         if not self._trades:

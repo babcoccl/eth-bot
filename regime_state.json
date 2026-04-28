@@ -1,8 +1,7 @@
 {
-  "session_id": "93435c08-a65",
+  "session_id": "38710390-bd6",
   "current_regime": "RANGE",
-  "total_h1_bars": 5185,
-  "total_pause_bars": 3416,
-  "pause_pct": 65.88,
-  "updated_at": "2026-04-28T00:09:32.700367+00:00"
+  "conviction": 1.0,
+  "advisor_notes": "System default: High Conviction",
+  "updated_at": "2026-04-28T01:10:15.140589+00:00"
 }
