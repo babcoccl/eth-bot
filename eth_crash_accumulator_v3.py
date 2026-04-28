@@ -30,12 +30,10 @@ Capital pool (set by orchestrator or backtest harness):
 """
 
 import warnings
-import numpy as np
 import pandas as pd
-from dataclasses import dataclass
-from typing import Optional, List
+from typing import List
 
-from eth_bot_interface import BotInterface, BotStatus, Position, Lot
+from eth_bot_interface import BotInterface, BotStatus, Position
 
 warnings.filterwarnings("ignore")
 
