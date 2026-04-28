@@ -469,24 +469,27 @@ class MacroSupervisor:
         try:
             con = sqlite3.connect(self.db_path)
             cur = con.cursor()
-            for t in self._regime_transitions:
-                cur.execute(
-                    """
-                    INSERT INTO regime_transitions
-                        (session_id, ts, from_regime, to_regime, trigger, price, rsi, drawdown_pct)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self._session_id,
-                        t.get("ts"),
-                        t.get("from_regime"),
-                        t.get("from_regime"),   # to_regime not tracked separately; same as from
-                        "",
-                        t.get("price"),
-                        t.get("rsi"),
-                        t.get("drawdown_pct"),
-                    ),
+            data = [
+                (
+                    self._session_id,
+                    t.get("ts"),
+                    t.get("from_regime"),
+                    t.get("from_regime"),   # to_regime not tracked separately; same as from
+                    "",
+                    t.get("price"),
+                    t.get("rsi"),
+                    t.get("drawdown_pct"),
                 )
+                for t in self._regime_transitions
+            ]
+            cur.executemany(
+                """
+                INSERT INTO regime_transitions
+                    (session_id, ts, from_regime, to_regime, trigger, price, rsi, drawdown_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                data
+            )
             con.commit()
             con.close()
         except Exception as exc:
