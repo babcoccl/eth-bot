@@ -219,16 +219,25 @@ class MacroSupervisor:
         dwell_col           = np.zeros(len(h), dtype=int)   # committed dwell counter
         committed_dwell_ct  = 0
 
+        # Pre-extract values for speed
+        ts_arr         = h["ts"].tolist()
+        close_arr      = h["close"].values
+        slow_arr       = h["slow_ema"].values
+        dd_arr         = h["drawdown"].values
+        ts_val_arr     = h["trend_strength"].values
+        rapid_drop_arr = h["pct_chg_24h"].values
+        rsi_arr        = h["rsi"].values
+
         for idx in range(len(h)):
-            row = h.iloc[idx]
-            rsi = row["rsi"]
-            if pd.isna(rsi):
+            rsi = rsi_arr[idx]
+            if np.isnan(rsi):
                 pause_col[idx]   = paused
+                dd_val = dd_arr[idx]
                 raw_r5 = self._classify_regime5(
                     paused, pause_trigger,
-                    float(row["drawdown"]) if not pd.isna(row["drawdown"]) else 0.0,
+                    float(dd_val) if not np.isnan(dd_val) else 0.0,
                     (idx - last_resume_bar) if last_resume_bar is not None else None,
-                    0.0, float(row["close"]), float(row["slow_ema"]), 50.0,
+                    0.0, float(close_arr[idx]), float(slow_arr[idx]), 50.0,
                     bull_entered_bar, idx)
                 # apply dwell filter even during NaN-RSI warmup
                 committed_regime, candidate_regime, candidate_dwell_ct, committed_dwell_ct = \
@@ -238,11 +247,11 @@ class MacroSupervisor:
                 dwell_col[idx]   = committed_dwell_ct
                 continue
 
-            close_v    = float(row["close"])
-            slow_ema   = float(row["slow_ema"])
-            dd         = float(row["drawdown"])
-            ts_val     = float(row["trend_strength"]) if not pd.isna(row["trend_strength"]) else 0.0
-            rapid_drop = float(row["pct_chg_24h"])    if not pd.isna(row["pct_chg_24h"])    else 0.0
+            close_v    = float(close_arr[idx])
+            slow_ema   = float(slow_arr[idx])
+            dd         = float(dd_arr[idx])
+            ts_val     = float(ts_val_arr[idx]) if not np.isnan(ts_val_arr[idx]) else 0.0
+            rapid_drop = float(rapid_drop_arr[idx]) if not np.isnan(rapid_drop_arr[idx]) else 0.0
 
             if not paused:
                 bars_since_resume = (idx - last_resume_bar) if last_resume_bar is not None else None
@@ -266,7 +275,7 @@ class MacroSupervisor:
                     bull_entered_bar = None
                     chg_str          = round(rapid_drop * 100, 1) if trigger_rapid else None
                     self.pause_events.append({
-                        "ts": row["ts"], "price": close_v,
+                        "ts": ts_arr[idx], "price": close_v,
                         "rsi": round(float(rsi), 1), "drawdown": round(dd * 100, 1),
                         "bar_idx": idx, "trigger": pause_trigger,
                         "chg_24h_pct": chg_str,
@@ -281,7 +290,7 @@ class MacroSupervisor:
                     last_resume_bar = idx
                     bull_entered_bar = None
                     self.resume_events.append({
-                        "ts": row["ts"], "price": close_v,
+                        "ts": ts_arr[idx], "price": close_v,
                         "rsi": round(float(rsi), 1),
                         "bars_paused": bars_paused,
                         "days_paused": round(bars_paused / 24, 1),
@@ -444,17 +453,24 @@ class MacroSupervisor:
         """
         self._regime_transitions = []
         prev_regime = None
-        for _, row in h.iterrows():
-            r = str(row["regime5"])
-            if r != prev_regime:
+
+        regime5_arr  = h["regime5"].values
+        ts_arr       = h["ts"].tolist()
+        close_arr    = h["close"].values
+        rsi_arr      = h["rsi"].values
+        drawdown_arr = h["drawdown"].values
+
+        for r, ts, price, rsi, dd in zip(regime5_arr, ts_arr, close_arr, rsi_arr, drawdown_arr):
+            r_str = str(r)
+            if r_str != prev_regime:
                 self._regime_transitions.append({
-                    "ts":           str(row["ts"]),
-                    "from_regime":  r,
-                    "price":        round(float(row["close"]), 2),
-                    "rsi":          round(float(row["rsi"]), 1) if not pd.isna(row["rsi"]) else None,
-                    "drawdown_pct": round(float(row["drawdown"]) * 100, 2),
+                    "ts":           str(ts),
+                    "from_regime":  r_str,
+                    "price":        round(float(price), 2),
+                    "rsi":          round(float(rsi), 1) if not np.isnan(rsi) else None,
+                    "drawdown_pct": round(float(dd) * 100, 2),
                 })
-                prev_regime = r
+                prev_regime = r_str
 
     # ------------------------------------------------------------------
     # _persist_regime_transitions  (called by apply_to_df)
@@ -556,7 +572,7 @@ class MacroSupervisor:
             idx   = self._h1_ts_index.searchsorted(ts_dt, side="right") - 1
             if idx < 0:
                 return "RANGE"
-            return str(self._h1_r5_series.iloc[min(idx, len(self._h1_r5_series) - 1)])
+            return str(self._h1_r5_series.values[min(idx, len(self._h1_r5_series) - 1)])
         except Exception:
             return "RANGE"
 
