@@ -343,6 +343,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             "history": history
         })
 
-with socketserver.TCPServer(("", PORT), DashboardHandler) as httpd:
-    print(f"Orchestrator Dashboard LIVE at http://localhost:{PORT}")
+with socketserver.TCPServer(("127.0.0.1", PORT), DashboardHandler) as httpd:
+    print(f"Orchestrator Dashboard LIVE at http://127.0.0.1:{PORT}")
     httpd.serve_forever()
