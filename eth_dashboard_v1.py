@@ -208,6 +208,12 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         async function updateDashboard() {
             try {
                 const res = await fetch('/api/data');
@@ -235,10 +241,13 @@ HTML_TEMPLATE = """
                     const isPos = bot.position.qty > 0;
                     if(isPos) activeCount++;
                     
+                    const botName = escapeHtml(bot.bot_id.split('_')[0].toUpperCase());
+                    const botStatus = isPos ? 'OPEN' : 'IDLE';
+
                     card.innerHTML = `
                         <div class="bot-name">
-                            ${bot.bot_id.split('_')[0].toUpperCase()}
-                            <span class="bot-status">${isPos ? 'OPEN' : 'IDLE'}</span>
+                            ${botName}
+                            <span class="bot-status">${botStatus}</span>
                         </div>
                         <div class="card-label">Inventory</div>
                         <div style="font-size: 1.25rem; font-weight: 700;">${bot.position.qty.toFixed(3)} ETH</div>
@@ -257,10 +266,15 @@ HTML_TEMPLATE = """
                 data.history.forEach(t => {
                     const row = document.createElement('tr');
                     const pnlClass = t.pnl > 0 ? 'pos' : (t.pnl < 0 ? 'neg' : '');
+
+                    const timestamp = escapeHtml(t.ts.split(' ')[1] || '');
+                    const botId = escapeHtml(t.bot_id);
+                    const side = escapeHtml(t.side);
+
                     row.innerHTML = `
-                        <td style="color: var(--text-dim)">${t.ts.split(' ')[1]}</td>
-                        <td style="font-weight: 600;">${t.bot_id}</td>
-                        <td>${t.side}</td>
+                        <td style="color: var(--text-dim)">${timestamp}</td>
+                        <td style="font-weight: 600;">${botId}</td>
+                        <td>${side}</td>
                         <td>$${Math.round(t.price)}</td>
                         <td class="${pnlClass}">${t.pnl ? '$' + t.pnl.toFixed(2) : '-'}</td>
                     `;
